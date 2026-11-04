@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # LLM provider selection. Local Ollama is the zero-config default.
     llm_provider: str = "ollama"
 
+    # Ollama connection (used when llm_provider="ollama"). The base URL points at
+    # a local install or a containerized Ollama; the model is pulled on that host.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+
     # Optional provider / integration credentials (empty by default).
     groq_api_key: str | None = None
     gemini_api_key: str | None = None
