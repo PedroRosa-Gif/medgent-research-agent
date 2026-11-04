@@ -9,5 +9,6 @@ implement these interfaces; ports never import adapters.
 """
 
 from medgent.application.ports.llm_port import LLMPort
+from medgent.application.ports.retrieval_port import EvidenceRetrievalPort
 
-__all__ = ["LLMPort"]
+__all__ = ["EvidenceRetrievalPort", "LLMPort"]
