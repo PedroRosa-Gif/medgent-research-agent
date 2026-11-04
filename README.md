@@ -93,7 +93,7 @@ medgent-research-agent/
 ## Roadmap
 
 - [x] System architecture & design
-- [ ] Project scaffolding (hexagonal layout, tooling, CI)
+- [x] Project scaffolding (hexagonal layout, tooling, CI)
 - [ ] Agent state & Pydantic schemas
 - [ ] LLM provider abstraction (Ollama / Groq / Gemini)
 - [ ] Retrieval adapters (PubMed, web search)
