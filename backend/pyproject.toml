@@ -10,6 +10,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-ollama>=0.2",
     "requests>=2.31",
+    "ddgs>=9",
 ]
 
 [build-system]
