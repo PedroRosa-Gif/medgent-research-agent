@@ -8,6 +8,10 @@ Dependency rule: the graph depends on ``domain`` and on ports (abstractions).
 It must never import concrete ``adapters``; implementations are injected in.
 """
 
-from medgent.application.graph.nodes import make_fetch_evidence_node, make_planner_node
+from medgent.application.graph.nodes import (
+    make_evaluator_node,
+    make_fetch_evidence_node,
+    make_planner_node,
+)
 
-__all__ = ["make_fetch_evidence_node", "make_planner_node"]
+__all__ = ["make_evaluator_node", "make_fetch_evidence_node", "make_planner_node"]

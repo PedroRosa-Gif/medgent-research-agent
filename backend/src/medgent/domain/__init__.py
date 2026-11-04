@@ -15,6 +15,7 @@ from medgent.domain.schemas import (
     QueryPlan,
     StudyType,
 )
+from medgent.domain.scoring import combine_scores, heuristic_score
 from medgent.domain.state import AgentState, initial_state
 
 __all__ = [
@@ -24,5 +25,7 @@ __all__ = [
     "EvidenceSource",
     "QueryPlan",
     "StudyType",
+    "combine_scores",
+    "heuristic_score",
     "initial_state",
 ]
