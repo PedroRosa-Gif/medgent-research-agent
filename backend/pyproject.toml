@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2",
     "langchain-core>=0.3",
     "langchain-ollama>=0.2",
+    "requests>=2.31",
 ]
 
 [build-system]
@@ -22,6 +23,7 @@ packages = ["src/medgent"]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "responses>=0.25",
 ]
 
 [tool.pytest.ini_options]
