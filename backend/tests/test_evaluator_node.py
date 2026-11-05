@@ -14,7 +14,13 @@ from __future__ import annotations
 from datetime import date
 
 from medgent.application.graph import make_evaluator_node
-from medgent.domain.schemas import Evidence, EvidenceSource, StudyExtraction, StudyType
+from medgent.domain.schemas import (
+    Evidence,
+    EvidenceSource,
+    StudyBatchExtraction,
+    StudyExtraction,
+    StudyType,
+)
 from medgent.domain.scoring import combine_scores, heuristic_score
 from medgent.domain.state import initial_state
 
@@ -22,22 +28,54 @@ _LONG_ABSTRACT = "y" * 400
 
 
 class QueueLLM:
-    """``LLMPort`` double returning queued :class:`StudyExtraction` per call.
+    """``LLMPort`` double returning queued extractions per structured call.
 
-    Each ``generate_structured`` call pops the next canned extraction from the
-    queue. A queued ``RuntimeError`` (rather than an extraction) is raised
-    instead, to exercise the node's per-study failure handling.
+    The queue holds the extractions the node should receive, one per *study*, in
+    order. ``generate_structured`` branches on ``schema``:
+
+    - ``StudyExtraction`` (single path): pop one extraction and return it.
+    - ``StudyBatchExtraction`` (batch path): pop ``batch_size`` extractions and
+      wrap them in a :class:`StudyBatchExtraction` (the batch count is inferred
+      from the node's ``batch_size``, recorded on the fake).
+
+    A queued ``Exception`` is raised instead of being returned, to exercise the
+    node's failure handling. For the batch path a single ``Exception`` entry at
+    the head of the queue makes the whole batch call raise.
     """
 
-    def __init__(self, responses: list[StudyExtraction | Exception]) -> None:
+    def __init__(
+        self,
+        responses: list[StudyExtraction | Exception],
+        *,
+        batch_size: int = 1,
+    ) -> None:
         self._responses = list(responses)
+        self._batch_size = batch_size
         self.prompts: list[str] = []
+        self.single_calls = 0
+        self.batch_calls = 0
 
     def generate(self, prompt: str) -> str:
         return f"echo: {prompt}"
 
     def generate_structured(self, prompt: str, schema: type) -> object:
         self.prompts.append(prompt)
+        if schema is StudyBatchExtraction:
+            self.batch_calls += 1
+            # A leading Exception makes the batch call itself raise.
+            if self._responses and isinstance(self._responses[0], Exception):
+                raise self._responses.pop(0)
+            studies: list[StudyExtraction] = []
+            for _ in range(self._batch_size):
+                if not self._responses:
+                    break
+                response = self._responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                studies.append(response)
+            return StudyBatchExtraction(studies=studies)
+
+        self.single_calls += 1
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -123,7 +161,7 @@ def test_evaluator_sufficient_when_enough_studies_pass_threshold() -> None:
     ]
     # Each heuristic is 1.0; relevance 1.0 => quality 1.0 >= 0.6 for all three.
     llm = QueueLLM([_extraction(relevance=1.0) for _ in evidence])
-    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6)
+    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -149,7 +187,7 @@ def test_evaluator_insufficient_when_too_few_pass_threshold() -> None:
             _extraction(relevance=0.0),
         ]
     )
-    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6)
+    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -219,7 +257,7 @@ def test_evaluator_skips_study_whose_extraction_raises() -> None:
             _extraction(relevance=1.0),
         ]
     )
-    evaluator = make_evaluator_node(llm)
+    evaluator = make_evaluator_node(llm, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -228,3 +266,123 @@ def test_evaluator_skips_study_whose_extraction_raises() -> None:
     identifiers = [s.identifier for s in update["evaluated_studies"]]
     assert identifiers == ["good-1", "good-2"]
     assert update["iteration"] == 1
+
+
+# --- batch path --------------------------------------------------------------
+
+
+def test_evaluator_batch_happy_path_one_call_three_studies() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    llm = QueueLLM(
+        [
+            _extraction(relevance=1.0),
+            _extraction(relevance=0.9),
+            _extraction(relevance=0.8),
+        ],
+        batch_size=3,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # Exactly one batch call, no single-study calls.
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 0
+
+    studies = update["evaluated_studies"]
+    assert len(studies) == 3
+    # Identifiers are pinned from the Evidence in presentation order, and each
+    # quality_score is computed in code from heuristic + the returned relevance.
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+    for ev, study, relevance in zip(evidence, studies, (1.0, 0.9, 0.8), strict=True):
+        expected = combine_scores(heuristic_score(ev), relevance, heuristic_weight=0.5)
+        assert study.quality_score == expected
+        assert study.relevance_score == relevance
+    assert update["iteration"] == 1
+
+
+def test_evaluator_batch_wrong_count_falls_back_to_single() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    # The fake is told batch_size=2 while the node uses batch_size=3, so the batch
+    # call returns only 2 extractions for a chunk of 3 => count mismatch. The
+    # queue keeps enough extractions for the subsequent one-at-a-time fallback.
+    llm = QueueLLM(
+        [_extraction(relevance=1.0) for _ in range(5)],
+        batch_size=2,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # One batch call (mismatch) then three single-study fallback calls.
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 3
+    studies = update["evaluated_studies"]
+    assert len(studies) == 3
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+
+
+def test_evaluator_batch_exception_falls_back_to_single() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    # A leading Exception makes the batch call raise; the three extractions after
+    # it feed the one-at-a-time fallback.
+    llm = QueueLLM(
+        [
+            RuntimeError("batch blew up"),
+            _extraction(relevance=1.0),
+            _extraction(relevance=1.0),
+            _extraction(relevance=1.0),
+        ],
+        batch_size=3,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 3
+    studies = update["evaluated_studies"]
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+
+
+def test_evaluator_batch_size_one_uses_single_path_only() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    llm = QueueLLM(
+        [_extraction(relevance=1.0), _extraction(relevance=1.0)],
+        batch_size=1,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=1)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # batch_size == 1 never requests StudyBatchExtraction.
+    assert llm.batch_calls == 0
+    assert llm.single_calls == 2
+    assert len(update["evaluated_studies"]) == 2

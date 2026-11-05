@@ -44,7 +44,8 @@ class ResearchTopicUseCase:
     The tuning parameters mirror :func:`build_graph`'s defaults so the use case is
     a thin, faithful wrapper: ``max_iterations`` seeds the loop ceiling in the
     state, while ``max_results_per_source``, ``min_studies``, ``quality_threshold``,
-    and ``heuristic_weight`` are forwarded to the graph nodes.
+    ``heuristic_weight``, ``max_studies_per_iteration``, and ``batch_size`` are
+    forwarded to the graph nodes.
     """
 
     def __init__(
@@ -53,10 +54,12 @@ class ResearchTopicUseCase:
         sources: Sequence[EvidenceRetrievalPort],
         *,
         max_iterations: int = 3,
-        max_results_per_source: int = 10,
+        max_results_per_source: int = 8,
         min_studies: int = 3,
         quality_threshold: float = 0.6,
         heuristic_weight: float = 0.5,
+        max_studies_per_iteration: int = 12,
+        batch_size: int = 3,
     ) -> None:
         self._max_iterations = max_iterations
         self._compiled = build_graph(
@@ -66,6 +69,8 @@ class ResearchTopicUseCase:
             min_studies=min_studies,
             quality_threshold=quality_threshold,
             heuristic_weight=heuristic_weight,
+            max_studies_per_iteration=max_studies_per_iteration,
+            batch_size=batch_size,
         )
 
     def run(

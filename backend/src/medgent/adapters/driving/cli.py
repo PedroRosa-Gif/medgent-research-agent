@@ -92,6 +92,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the Ollama model (e.g. llama3.2:3b).",
     )
     parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=None,
+        help="Max results fetched per source per query (default: 8).",
+    )
+    parser.add_argument(
+        "--max-studies",
+        type=int,
+        default=None,
+        help="Max studies evaluated per iteration (default: 12).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Studies evaluated per LLM call, with one-at-a-time fallback (default: 3).",
+    )
+    parser.add_argument(
         "--no-save",
         action="store_true",
         help="Print the report but do not write it to a file.",
@@ -159,10 +177,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     llm = build_llm(settings)
     pubmed = PubMedAdapter(api_key=settings.ncbi_api_key)
     web = WebSearchAdapter()
+    # Forward the optional tuning flags only when the user set them, so the
+    # use case keeps owning the defaults rather than duplicating them here.
+    tuning: dict[str, int] = {}
+    if args.max_papers is not None:
+        tuning["max_results_per_source"] = args.max_papers
+    if args.max_studies is not None:
+        tuning["max_studies_per_iteration"] = args.max_studies
+    if args.batch_size is not None:
+        tuning["batch_size"] = args.batch_size
     use_case = ResearchTopicUseCase(
         llm,
         [pubmed, web],
         max_iterations=args.max_iterations,
+        **tuning,
     )
 
     print(f"Researching: {args.topic}\n")

@@ -76,10 +76,12 @@ def build_graph(
     llm: LLMPort,
     sources: Sequence[EvidenceRetrievalPort],
     *,
-    max_results_per_source: int = 10,
+    max_results_per_source: int = 8,
     min_studies: int = 3,
     quality_threshold: float = 0.6,
     heuristic_weight: float = 0.5,
+    max_studies_per_iteration: int = 12,
+    batch_size: int = 3,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Wire the research nodes into a compiled, checkpointed LangGraph.
@@ -87,8 +89,8 @@ def build_graph(
     The ports (``llm`` and the retrieval ``sources``) are injected into the node
     factories here; this function never touches a concrete adapter. The tuning
     parameters (``max_results_per_source``, ``min_studies``, ``quality_threshold``,
-    ``heuristic_weight``) are forwarded to the ``fetch_evidence`` and ``evaluator``
-    factories.
+    ``heuristic_weight``, ``max_studies_per_iteration``, ``batch_size``) are
+    forwarded to the ``fetch_evidence`` and ``evaluator`` factories.
 
     Topology — ``START -> planner -> fetch_evidence -> evaluator``, then a
     conditional edge on :func:`route_after_evaluator`: ``"finish"`` goes to
@@ -121,6 +123,8 @@ def build_graph(
             min_studies=min_studies,
             quality_threshold=quality_threshold,
             heuristic_weight=heuristic_weight,
+            max_studies_per_iteration=max_studies_per_iteration,
+            batch_size=batch_size,
         ),
     )
     graph.add_node("refine_queries", make_refine_queries_node(llm))

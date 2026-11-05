@@ -25,7 +25,13 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from medgent.application.retrieval import aggregate_evidence
-from medgent.domain.schemas import EvaluatedStudy, Evidence, QueryPlan, StudyExtraction
+from medgent.domain.schemas import (
+    EvaluatedStudy,
+    Evidence,
+    QueryPlan,
+    StudyBatchExtraction,
+    StudyExtraction,
+)
 from medgent.domain.scoring import combine_scores, heuristic_score
 
 if TYPE_CHECKING:
@@ -72,7 +78,7 @@ def make_planner_node(llm: LLMPort) -> Callable[[AgentState], dict]:
 
 def make_fetch_evidence_node(
     sources: Sequence[EvidenceRetrievalPort],
-    max_results_per_source: int = 10,
+    max_results_per_source: int = 8,
 ) -> Callable[[AgentState], dict]:
     """Build the ``fetch_evidence`` node bound to the given retrieval sources.
 
@@ -127,6 +133,44 @@ Study title: {title}
 
 Study abstract: {abstract}"""
 
+# Batch evaluator prompt template. Instead of one call per study, the evaluator
+# can present several studies at once (numbered 1..N) and ask the model for one
+# structured assessment per study, returned in the SAME ORDER and SAME COUNT as
+# the inputs so the node can zip them back onto the source evidence positionally.
+# As in the single-study path, ``identifier`` and ``quality_score`` are set by the
+# node in code, never by the model (see ``make_evaluator_node``).
+_EVALUATOR_BATCH_PROMPT = """You are a clinical evidence analyst extracting a \
+structured assessment of several studies at once.
+
+For EACH numbered study below, extract:
+- study_type: the methodological category (e.g. meta_analysis, systematic_review, \
+rct, cohort, case_control, observational, review, other).
+- sample_size: the number of participants if stated, otherwise leave it unset.
+- key_finding: one concise sentence stating the study's main clinical finding.
+- relevance_score: a number in [0.0, 1.0] for how relevant this study is to the \
+research topic.
+
+Return exactly one assessment per study, in the SAME ORDER as the studies are \
+listed and with the SAME COUNT — do not skip, merge, reorder, or add studies.
+
+Research topic: {topic}
+
+Studies:
+{studies}"""
+
+
+def _format_batch_studies(chunk: Sequence[Evidence]) -> str:
+    """Render a chunk of evidence into a numbered (1..N) title+abstract list.
+
+    The numbering makes the one-assessment-per-study, same-order contract explicit
+    to the model; the node relies on positional order, not the numbers, to zip the
+    returned extractions back onto the source :class:`Evidence`.
+    """
+    blocks: list[str] = []
+    for index, evidence in enumerate(chunk, start=1):
+        blocks.append(f"{index}. Title: {evidence.title}\n   Abstract: {evidence.abstract or ''}")
+    return "\n\n".join(blocks)
+
 
 def make_evaluator_node(
     llm: LLMPort,
@@ -134,85 +178,149 @@ def make_evaluator_node(
     min_studies: int = 3,
     quality_threshold: float = 0.6,
     heuristic_weight: float = 0.5,
-    max_studies_per_iteration: int = 15,
+    max_studies_per_iteration: int = 12,
+    batch_size: int = 3,
 ) -> Callable[[AgentState], dict]:
     """Build the ``evaluator`` node bound to the given :class:`LLMPort`.
 
     The returned callable implements the hybrid scoring of ``docs/architecture.md``
     §4: for each evidence record it computes a deterministic structural heuristic
-    in code (:func:`heuristic_score`), asks the LLM for a structured
-    :class:`EvaluatedStudy` (study type, sample size, key finding, relevance to
-    ``state["topic"]``) one abstract at a time, then blends the heuristic with the
-    model's relevance into a final ``quality_score`` via :func:`combine_scores`.
+    in code (:func:`heuristic_score`), asks the LLM for the semantic fields of a
+    study (study type, sample size, key finding, relevance to ``state["topic"]``),
+    then blends the heuristic with the model's relevance into a final
+    ``quality_score`` via :func:`combine_scores`.
 
-    Two fields are never trusted to the model and are always set in code: the
-    ``identifier`` is copied from the source :class:`Evidence` (not echoed by the
-    LLM), and the ``quality_score`` is the combined computation (overriding
-    whatever the LLM returned). The LLM-provided ``study_type``, ``sample_size``,
-    ``key_finding``, and ``relevance_score`` are kept.
+    To cut the number of LLM round-trips, studies are evaluated in *batches*: the
+    top ``max_studies_per_iteration`` evidence records (ranked by
+    :func:`heuristic_score`) are split into chunks of ``batch_size``, and each
+    chunk is extracted in a single :class:`StudyBatchExtraction` call. A chunk of
+    one — or ``batch_size == 1`` — uses the single-study :class:`StudyExtraction`
+    path instead. If a batch call raises OR returns the wrong number of
+    extractions, the node logs it and FALLS BACK to evaluating that chunk's studies
+    one at a time; a single-study failure within the fallback is logged and skipped
+    so one bad extraction cannot abort the whole evaluation.
+
+    Two fields are never trusted to the model and are always set in code, in BOTH
+    the batch and single paths: the ``identifier`` is copied from the source
+    :class:`Evidence` (not echoed by the LLM), and the ``quality_score`` is the
+    combined computation (overriding whatever the LLM returned). The LLM-provided
+    ``study_type``, ``sample_size``, ``key_finding``, and ``relevance_score`` are
+    kept.
 
     Sufficiency is a threshold-plus-count rule: the run is sufficient once at
     least ``min_studies`` evaluated studies have ``quality_score`` at or above
-    ``quality_threshold``. A per-study LLM failure is logged and skipped so one
-    bad extraction cannot abort the whole evaluation. The node always increments
-    ``iteration`` (even on empty evidence) so the self-correction loop's ceiling
-    advances, and returns only the keys it changed:
+    ``quality_threshold``. The node always increments ``iteration`` (even on empty
+    evidence) so the self-correction loop's ceiling advances, and returns only the
+    keys it changed:
     ``{"evaluated_studies": [...], "is_sufficient": bool, "iteration": int}``.
     """
+
+    def _build_study(evidence: Evidence, extracted: StudyExtraction) -> EvaluatedStudy:
+        """Combine one source evidence with its LLM extraction into a final study.
+
+        The LLM's semantic fields are kept; the ``identifier`` comes from the
+        source evidence and the ``quality_score`` is computed in code, so the model
+        never owns those two fields.
+        """
+        quality = combine_scores(
+            heuristic_score(evidence),
+            extracted.relevance_score,
+            heuristic_weight=heuristic_weight,
+        )
+        return EvaluatedStudy(
+            identifier=evidence.identifier,
+            study_type=extracted.study_type,
+            sample_size=extracted.sample_size,
+            key_finding=extracted.key_finding,
+            relevance_score=extracted.relevance_score,
+            quality_score=quality,
+        )
+
+    def _evaluate_single(evidence: Evidence, topic: str) -> EvaluatedStudy | None:
+        """Evaluate one study via the single-study path; ``None`` on failure.
+
+        Asks the LLM only for the semantic fields (:class:`StudyExtraction`) so it
+        cannot emit an out-of-range ``quality_score`` and fail validation. A failed
+        extraction is logged and skipped (returns ``None``).
+        """
+        prompt = _EVALUATOR_PROMPT.format(
+            topic=topic,
+            title=evidence.title,
+            abstract=evidence.abstract or "",
+        )
+        try:
+            extracted = llm.generate_structured(prompt, StudyExtraction)
+        except Exception:
+            # One bad extraction must not kill the whole evaluation: log it and
+            # let the caller move on to the next study.
+            _logger.exception(
+                "evaluator: structured extraction failed for %s; skipping",
+                evidence.identifier,
+            )
+            return None
+        return _build_study(evidence, extracted)
+
+    def _evaluate_chunk(chunk: Sequence[Evidence], topic: str) -> list[EvaluatedStudy]:
+        """Evaluate one chunk, batching when possible and falling back when not.
+
+        A chunk of one (or ``batch_size == 1``) goes straight to the single-study
+        path. Otherwise one :class:`StudyBatchExtraction` call is made; if it
+        raises or returns the wrong count, the node logs it and re-evaluates the
+        chunk one study at a time.
+        """
+        if batch_size == 1 or len(chunk) == 1:
+            return [
+                study
+                for evidence in chunk
+                if (study := _evaluate_single(evidence, topic)) is not None
+            ]
+
+        prompt = _EVALUATOR_BATCH_PROMPT.format(
+            topic=topic,
+            studies=_format_batch_studies(chunk),
+        )
+        try:
+            batch = llm.generate_structured(prompt, StudyBatchExtraction)
+        except Exception:
+            _logger.exception(
+                "evaluator: batch extraction raised for %d studies; falling back to one-at-a-time",
+                len(chunk),
+            )
+        else:
+            if len(batch.studies) == len(chunk):
+                return [
+                    _build_study(evidence, extracted)
+                    for evidence, extracted in zip(chunk, batch.studies, strict=True)
+                ]
+            _logger.warning(
+                "evaluator: batch returned %d extractions for %d studies; "
+                "falling back to one-at-a-time",
+                len(batch.studies),
+                len(chunk),
+            )
+
+        # Fallback: the batch call failed or mismatched — evaluate each study on
+        # its own, skipping any individual failure as in the single path.
+        return [
+            study for evidence in chunk if (study := _evaluate_single(evidence, topic)) is not None
+        ]
 
     def evaluator(state: AgentState) -> dict:
         topic = state["topic"]
         evidence_items = state.get("evidence") or []
         iteration = state.get("iteration", 0)
 
-        # Cap how many studies we send to the LLM per iteration: the evaluator
-        # makes one (sequential) call per study, so an unbounded evidence pool
-        # (easily dozens of papers) makes a local model painfully slow. Prefer
-        # the structurally stronger evidence by heuristic, then evaluate the top
-        # slice.
+        # Cap how many studies we send to the LLM per iteration: an unbounded
+        # evidence pool (easily dozens of papers) makes a local model painfully
+        # slow. Prefer the structurally stronger evidence by heuristic, then
+        # evaluate the top slice — in batches to cut LLM round-trips.
         ranked = sorted(evidence_items, key=heuristic_score, reverse=True)
         to_evaluate = ranked[:max_studies_per_iteration]
 
         evaluated_studies: list[EvaluatedStudy] = []
-        for evidence in to_evaluate:
-            heuristic = heuristic_score(evidence)
-            prompt = _EVALUATOR_PROMPT.format(
-                topic=topic,
-                title=evidence.title,
-                abstract=evidence.abstract or "",
-            )
-            try:
-                # Ask the LLM only for the semantic fields (StudyExtraction);
-                # identifier and quality_score are set by us below, so the model
-                # cannot emit an out-of-range quality_score and fail validation.
-                extracted = llm.generate_structured(prompt, StudyExtraction)
-            except Exception:
-                # One bad extraction must not kill the whole evaluation: log it
-                # and move on to the next study.
-                _logger.exception(
-                    "evaluator: structured extraction failed for %s; skipping",
-                    evidence.identifier,
-                )
-                continue
-
-            quality = combine_scores(
-                heuristic,
-                extracted.relevance_score,
-                heuristic_weight=heuristic_weight,
-            )
-            # Build the final record: the LLM's semantic fields plus the two
-            # fields the application owns (identifier from the source evidence,
-            # quality_score computed in code).
-            evaluated_studies.append(
-                EvaluatedStudy(
-                    identifier=evidence.identifier,
-                    study_type=extracted.study_type,
-                    sample_size=extracted.sample_size,
-                    key_finding=extracted.key_finding,
-                    relevance_score=extracted.relevance_score,
-                    quality_score=quality,
-                )
-            )
+        for start in range(0, len(to_evaluate), batch_size):
+            chunk = to_evaluate[start : start + batch_size]
+            evaluated_studies.extend(_evaluate_chunk(chunk, topic))
 
         passing = sum(1 for s in evaluated_studies if s.quality_score >= quality_threshold)
         is_sufficient = passing >= min_studies

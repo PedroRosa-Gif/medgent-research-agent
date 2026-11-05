@@ -10,11 +10,14 @@ synthesizer. No network, no provider SDK.
 
 from __future__ import annotations
 
+import re
+
 from medgent.application.use_cases import ResearchTopicUseCase
 from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
     StudyExtraction,
     StudyType,
 )
@@ -22,8 +25,18 @@ from medgent.domain.schemas import (
 _LONG_ABSTRACT = "y" * 400
 
 
+def _count_numbered_studies(prompt: str) -> int:
+    """Count the ``N. Title:`` entries in a batch evaluator prompt."""
+    return len(re.findall(r"(?m)^\d+\.\s", prompt))
+
+
 class FakeLLM:
-    """``LLMPort`` double: structured per-schema output + canned prose."""
+    """``LLMPort`` double: structured per-schema output + canned prose.
+
+    The evaluator may call with either ``StudyExtraction`` (single path) or
+    ``StudyBatchExtraction`` (batch path); for a batch the fake returns the canned
+    study repeated to match the number of studies in the prompt.
+    """
 
     def __init__(self, *, plan: QueryPlan, study: StudyExtraction) -> None:
         self._plan = plan
@@ -35,6 +48,9 @@ class FakeLLM:
     def generate_structured(self, prompt: str, schema: type) -> object:
         if schema is QueryPlan:
             return self._plan
+        if schema is StudyBatchExtraction:
+            count = _count_numbered_studies(prompt)
+            return StudyBatchExtraction(studies=[self._study for _ in range(count)])
         if schema is StudyExtraction:
             return self._study
         raise AssertionError(f"unexpected schema requested: {schema!r}")

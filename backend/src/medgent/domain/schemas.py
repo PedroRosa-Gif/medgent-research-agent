@@ -89,6 +89,22 @@ class StudyExtraction(BaseModel):
     relevance_score: float = Field(ge=0.0, le=1.0)
 
 
+class StudyBatchExtraction(BaseModel):
+    """What the LLM returns when several studies are extracted in one call.
+
+    The evaluator node batches studies to cut the number of LLM round-trips: it
+    presents a numbered list of studies and asks the model for a
+    :class:`StudyExtraction` for each. ``studies`` holds those extractions in the
+    SAME ORDER as the studies were presented, so the node can zip them back onto
+    the source :class:`Evidence` records positionally. Like :class:`StudyExtraction`
+    this schema deliberately omits the ``identifier`` and ``quality_score`` the
+    application owns. An empty list is valid (the node treats a batch whose count
+    does not match the inputs as a failure and falls back to one-at-a-time).
+    """
+
+    studies: list[StudyExtraction]
+
+
 class EvaluatedStudy(BaseModel):
     """The structured assessment produced by the evaluator node.
 

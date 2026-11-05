@@ -13,6 +13,7 @@ from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
     StudyExtraction,
     StudyType,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "Evidence",
     "EvidenceSource",
     "QueryPlan",
+    "StudyBatchExtraction",
     "StudyExtraction",
     "StudyType",
     "combine_scores",

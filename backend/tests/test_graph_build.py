@@ -14,11 +14,14 @@ persistence via ``get_state``.
 
 from __future__ import annotations
 
+import re
+
 from medgent.application.graph import build_graph
 from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
     StudyExtraction,
     StudyType,
 )
@@ -27,14 +30,25 @@ from medgent.domain.state import initial_state
 _LONG_ABSTRACT = "y" * 400
 
 
+def _count_numbered_studies(prompt: str) -> int:
+    """Count the ``N. Title:`` entries in a batch evaluator prompt.
+
+    The batch prompt lists each study as ``"<n>. Title: ..."``; counting those
+    lines tells the fake how many extractions the node expects back.
+    """
+    return len(re.findall(r"(?m)^\d+\.\s", prompt))
+
+
 class FakeLLM:
     """``LLMPort`` double returning canned structured output per schema.
 
     Planner and refine call ``generate_structured(prompt, QueryPlan)``; the
-    evaluator calls it with ``StudyExtraction``. The fake branches on ``schema``
-    to return the right canned type, and counts how many times refine (i.e. a
-    ``QueryPlan`` request carrying the refine prompt marker) was asked for so tests
-    can assert loop behaviour.
+    evaluator calls it with either ``StudyExtraction`` (single path) or
+    ``StudyBatchExtraction`` (batch path). The fake branches on ``schema`` to
+    return the right canned type — for a batch it returns the canned study
+    repeated to match the number of studies in the prompt — and counts how many
+    times refine (a ``QueryPlan`` request carrying the refine prompt marker) and
+    the evaluator were asked for so tests can assert loop behaviour.
     """
 
     def __init__(
@@ -63,6 +77,10 @@ class FakeLLM:
                 return self._refine_plan
             self.planner_calls += 1
             return self._plan
+        if schema is StudyBatchExtraction:
+            count = _count_numbered_studies(prompt)
+            self.evaluator_calls += count
+            return StudyBatchExtraction(studies=[self._study for _ in range(count)])
         if schema is StudyExtraction:
             self.evaluator_calls += 1
             return self._study
