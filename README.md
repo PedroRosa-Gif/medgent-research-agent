@@ -66,6 +66,8 @@ flowchart TD
 📄 Full design, component breakdown, and design-decision rationale:
 [`docs/architecture.md`](docs/architecture.md).
 
+🐳 Run the local LLM (Ollama via Docker): [`docs/running-locally.md`](docs/running-locally.md).
+
 ## Tech stack
 
 | Area | Choice |

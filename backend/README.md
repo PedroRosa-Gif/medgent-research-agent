@@ -31,3 +31,9 @@ uv run pytest                # tests
 ```
 
 Copy `.env.example` to `.env` and adjust as needed.
+
+## Local LLM (Ollama)
+
+The default provider is a local Ollama server run via Docker. Bring it up with
+`docker compose up -d` from the repo root (it auto-pulls the model). Full
+walkthrough: [`../docs/running-locally.md`](../docs/running-locally.md).
