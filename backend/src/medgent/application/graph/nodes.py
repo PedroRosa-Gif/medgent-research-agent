@@ -209,3 +209,71 @@ def make_evaluator_node(
         }
 
     return evaluator
+
+
+# Refine prompt template. Reached only when the evaluator judged the current
+# evidence insufficient and the iteration ceiling has not been hit. The LLM is
+# asked for *new* queries that chase the gaps the previous queries missed —
+# different clinical angles and terminology — explicitly avoiding repeats of what
+# was already tried, so each loop pass searches genuinely new ground.
+_REFINE_PROMPT = """You are a clinical research librarian refining a literature search \
+that did not yet surface enough strong evidence.
+
+The queries already tried did not return sufficient high-quality studies. Propose a \
+new set of search queries that target gaps the previous attempt missed. Explore \
+different clinical angles (e.g. mechanism, specific populations or subgroups, \
+comparators, long-term or adverse outcomes) and alternative terminology or MeSH-style \
+synonyms. Do NOT repeat any of the previously tried queries, and avoid merely \
+rephrasing them.
+
+Research topic: {topic}
+
+Previously tried queries:
+{tried_queries}
+
+Evidence found so far: {found_summary}"""
+
+
+def make_refine_queries_node(llm: LLMPort) -> Callable[[AgentState], dict]:
+    """Build the ``refine_queries`` node bound to the given :class:`LLMPort`.
+
+    Reached on the self-correction loop's "refine" branch, i.e. when the evaluator
+    found the evidence insufficient and the iteration ceiling has not been hit.
+    The returned callable reads ``state["topic"]``, the previously tried
+    ``state["queries"]``, and ``state["evaluated_studies"]`` (used only to tell the
+    model, briefly, what was already found), then asks the LLM for a fresh
+    :class:`QueryPlan` aimed at the gaps the previous queries missed. It returns
+    ``{"queries": plan.queries}``, which overwrites the old queries so the next
+    ``fetch_evidence`` pass searches new ground.
+
+    Fallback: if the model returns a degenerate plan with no usable queries, the
+    node falls back to the previously tried queries (or the topic itself when none
+    were recorded) so the loop keeps a non-empty query list rather than stalling.
+    """
+
+    def refine_queries(state: AgentState) -> dict:
+        topic = state["topic"]
+        previous_queries = state.get("queries", [])
+        evaluated_studies = state.get("evaluated_studies", [])
+
+        tried_queries = (
+            "\n".join(f"- {query}" for query in previous_queries)
+            if previous_queries
+            else "(none recorded)"
+        )
+        if evaluated_studies:
+            findings = "; ".join(s.key_finding for s in evaluated_studies[:5])
+            found_summary = f"{len(evaluated_studies)} study/studies so far — {findings}"
+        else:
+            found_summary = "no usable studies yet"
+
+        prompt = _REFINE_PROMPT.format(
+            topic=topic,
+            tried_queries=tried_queries,
+            found_summary=found_summary,
+        )
+        plan = llm.generate_structured(prompt, QueryPlan)
+        queries = plan.queries or previous_queries or [topic]
+        return {"queries": queries}
+
+    return refine_queries
