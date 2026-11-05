@@ -1,0 +1,75 @@
+# MedGent — local LLM infrastructure (Ollama).
+#
+# `docker compose up -d` brings up the Ollama server AND auto-pulls the default
+# model, so once it finishes you have a ready local LLM at http://localhost:11434
+# (the OllamaAdapter's default base URL — see backend/src/medgent/config.py).
+#
+# Switch models without editing this file:
+#   OLLAMA_MODEL=llama3.2:3b docker compose up -d     # lighter, ~2 GB (low RAM)
+# or put `OLLAMA_MODEL=llama3.2:3b` in a root `.env` (see .env.example).
+#
+# The default qwen2.5:7b is ~4.7 GB to download; the first `up` can take a while.
+# See docs/running-locally.md for the full walkthrough.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: medgent-ollama
+    ports:
+      # host:container — matches the adapter default of localhost:11434.
+      - "11434:11434"
+    volumes:
+      # Pulled models persist in this named volume — they live OUTSIDE the image
+      # and OUTSIDE the git repo, so re-creating the container keeps the models.
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      # The official ollama image ships neither curl nor wget, so probe with the
+      # Ollama CLI itself: `ollama list` succeeds only once the server is up.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Give the server room to start before the first probe counts against it.
+      start_period: 20s
+    # --- Optional GPU (disabled by default) ---------------------------------
+    # On Windows this needs Docker Desktop + WSL2 with the NVIDIA GPU driver.
+    # Uncomment to let Ollama use the GPU (much faster generation):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: ["gpu"]
+
+  ollama-init:
+    # Same image as the server; this one-shot container just pulls the model and
+    # exits, so a plain `docker compose up` ends with the model already present.
+    image: ollama/ollama:latest
+    container_name: medgent-ollama-init
+    depends_on:
+      ollama:
+        # Wait until the server's healthcheck passes before pulling.
+        condition: service_healthy
+    environment:
+      # Talk to the server container over the compose network — NOT localhost,
+      # which inside this container would point at itself.
+      - OLLAMA_HOST=ollama:11434
+    # Pull the model once, then exit. Override the model via OLLAMA_MODEL.
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${OLLAMA_MODEL:-qwen2.5:7b}"]
+    # One-shot job: don't restart it after it finishes.
+    restart: "no"
+
+volumes:
+  # Named volume for the model store. Docker manages it under its own data root.
+  ollama_data:
+    # --- Reuse an existing model store (optional) ---------------------------
+    # Already have models from another project? Point at that EXISTING named
+    # volume instead of creating a fresh one:
+    #   external: true
+    #   name: my_existing_ollama_volume
+    #
+    # Or bind-mount your host's ~/.ollama directly by replacing the volume line
+    # in the `ollama` service above with a bind mount, e.g. on Windows:
+    #   - "${USERPROFILE}/.ollama:/root/.ollama"
