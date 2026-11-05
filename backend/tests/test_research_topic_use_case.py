@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from medgent.application.use_cases import ResearchTopicUseCase
 from medgent.domain.schemas import (
-    EvaluatedStudy,
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyExtraction,
     StudyType,
 )
 
@@ -25,7 +25,7 @@ _LONG_ABSTRACT = "y" * 400
 class FakeLLM:
     """``LLMPort`` double: structured per-schema output + canned prose."""
 
-    def __init__(self, *, plan: QueryPlan, study: EvaluatedStudy) -> None:
+    def __init__(self, *, plan: QueryPlan, study: StudyExtraction) -> None:
         self._plan = plan
         self._study = study
 
@@ -35,7 +35,7 @@ class FakeLLM:
     def generate_structured(self, prompt: str, schema: type) -> object:
         if schema is QueryPlan:
             return self._plan
-        if schema is EvaluatedStudy:
+        if schema is StudyExtraction:
             return self._study
         raise AssertionError(f"unexpected schema requested: {schema!r}")
 
@@ -60,14 +60,12 @@ def _evidence(identifier: str) -> Evidence:
     )
 
 
-def _study(relevance: float = 1.0) -> EvaluatedStudy:
-    return EvaluatedStudy(
-        identifier="ignored",
+def _study(relevance: float = 1.0) -> StudyExtraction:
+    return StudyExtraction(
         study_type=StudyType.RCT,
         sample_size=100,
         key_finding="a finding",
         relevance_score=relevance,
-        quality_score=0.0,
     )
 
 

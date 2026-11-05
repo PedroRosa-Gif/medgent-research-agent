@@ -25,7 +25,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from medgent.application.retrieval import aggregate_evidence
-from medgent.domain.schemas import EvaluatedStudy, Evidence, QueryPlan
+from medgent.domain.schemas import EvaluatedStudy, Evidence, QueryPlan, StudyExtraction
 from medgent.domain.scoring import combine_scores, heuristic_score
 
 if TYPE_CHECKING:
@@ -134,6 +134,7 @@ def make_evaluator_node(
     min_studies: int = 3,
     quality_threshold: float = 0.6,
     heuristic_weight: float = 0.5,
+    max_studies_per_iteration: int = 15,
 ) -> Callable[[AgentState], dict]:
     """Build the ``evaluator`` node bound to the given :class:`LLMPort`.
 
@@ -164,8 +165,16 @@ def make_evaluator_node(
         evidence_items = state.get("evidence") or []
         iteration = state.get("iteration", 0)
 
+        # Cap how many studies we send to the LLM per iteration: the evaluator
+        # makes one (sequential) call per study, so an unbounded evidence pool
+        # (easily dozens of papers) makes a local model painfully slow. Prefer
+        # the structurally stronger evidence by heuristic, then evaluate the top
+        # slice.
+        ranked = sorted(evidence_items, key=heuristic_score, reverse=True)
+        to_evaluate = ranked[:max_studies_per_iteration]
+
         evaluated_studies: list[EvaluatedStudy] = []
-        for evidence in evidence_items:
+        for evidence in to_evaluate:
             heuristic = heuristic_score(evidence)
             prompt = _EVALUATOR_PROMPT.format(
                 topic=topic,
@@ -173,7 +182,10 @@ def make_evaluator_node(
                 abstract=evidence.abstract or "",
             )
             try:
-                extracted = llm.generate_structured(prompt, EvaluatedStudy)
+                # Ask the LLM only for the semantic fields (StudyExtraction);
+                # identifier and quality_score are set by us below, so the model
+                # cannot emit an out-of-range quality_score and fail validation.
+                extracted = llm.generate_structured(prompt, StudyExtraction)
             except Exception:
                 # One bad extraction must not kill the whole evaluation: log it
                 # and move on to the next study.
@@ -188,14 +200,17 @@ def make_evaluator_node(
                 extracted.relevance_score,
                 heuristic_weight=heuristic_weight,
             )
-            # Trust the LLM for the semantic fields only; pin the identifier to
-            # the source evidence and recompute the quality score in code.
+            # Build the final record: the LLM's semantic fields plus the two
+            # fields the application owns (identifier from the source evidence,
+            # quality_score computed in code).
             evaluated_studies.append(
-                extracted.model_copy(
-                    update={
-                        "identifier": evidence.identifier,
-                        "quality_score": quality,
-                    }
+                EvaluatedStudy(
+                    identifier=evidence.identifier,
+                    study_type=extracted.study_type,
+                    sample_size=extracted.sample_size,
+                    key_finding=extracted.key_finding,
+                    relevance_score=extracted.relevance_score,
+                    quality_score=quality,
                 )
             )
 

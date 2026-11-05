@@ -169,6 +169,18 @@ def test_persistent_failure_raises_web_search_error() -> None:
     assert len(sleep.calls) == 2
 
 
+def test_no_results_error_returns_empty_without_retry() -> None:
+    # ddgs raises "No results found." for an empty match; the adapter must treat
+    # that as [] (not a transient error) — no retry, no WebSearchError.
+    adapter, _, sleep = _make_adapter([RuntimeError("No results found.")])
+
+    results = adapter.search("an extremely obscure query")
+
+    assert results == []
+    # It returned on the first attempt, so no backoff sleep happened.
+    assert len(sleep.calls) == 0
+
+
 def test_adapter_satisfies_retrieval_port() -> None:
     adapter, _, _ = _make_adapter([[]])
 

@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from medgent.application.graph import build_graph
 from medgent.domain.schemas import (
-    EvaluatedStudy,
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyExtraction,
     StudyType,
 )
 from medgent.domain.state import initial_state
@@ -31,8 +31,8 @@ class FakeLLM:
     """``LLMPort`` double returning canned structured output per schema.
 
     Planner and refine call ``generate_structured(prompt, QueryPlan)``; the
-    evaluator calls it with ``EvaluatedStudy``. The fake branches on ``schema`` to
-    return the right canned type, and counts how many times refine (i.e. a
+    evaluator calls it with ``StudyExtraction``. The fake branches on ``schema``
+    to return the right canned type, and counts how many times refine (i.e. a
     ``QueryPlan`` request carrying the refine prompt marker) was asked for so tests
     can assert loop behaviour.
     """
@@ -42,7 +42,7 @@ class FakeLLM:
         *,
         plan: QueryPlan,
         refine_plan: QueryPlan,
-        study: EvaluatedStudy,
+        study: StudyExtraction,
     ) -> None:
         self._plan = plan
         self._refine_plan = refine_plan
@@ -63,7 +63,7 @@ class FakeLLM:
                 return self._refine_plan
             self.planner_calls += 1
             return self._plan
-        if schema is EvaluatedStudy:
+        if schema is StudyExtraction:
             self.evaluator_calls += 1
             return self._study
         raise AssertionError(f"unexpected schema requested: {schema!r}")
@@ -92,15 +92,13 @@ def _evidence(identifier: str) -> Evidence:
     )
 
 
-def _study(relevance: float) -> EvaluatedStudy:
-    """Build a canned evaluator output; identifier/quality are overridden by node."""
-    return EvaluatedStudy(
-        identifier="ignored",
+def _study(relevance: float) -> StudyExtraction:
+    """Build a canned evaluator extraction; identifier/quality are set by the node."""
+    return StudyExtraction(
         study_type=StudyType.RCT,
         sample_size=100,
         key_finding="a finding",
         relevance_score=relevance,
-        quality_score=0.0,
     )
 
 
