@@ -277,3 +277,104 @@ def make_refine_queries_node(llm: LLMPort) -> Callable[[AgentState], dict]:
         return {"queries": queries}
 
     return refine_queries
+
+
+# Synthesizer prompt template. Reached once the loop finishes (evidence sufficient
+# or the iteration ceiling hit). The LLM writes the prose report; the studies list
+# is formatted in code and interpolated so the model can cite each study by its
+# ``identifier`` (a PMID or URL). The disclaimer is appended in code afterwards, so
+# the prompt does not ask the model to produce it.
+_SYNTHESIZER_PROMPT = """You are a clinical evidence synthesist writing a concise, \
+systematic-review-style report for the research topic below, using only the \
+evaluated studies provided.
+
+Write the report in Markdown with these sections:
+- "## Summary" — a short overview of what the evidence shows.
+- "## Key Findings" — the main findings, drawing on the studies.
+- "## Limitations" — gaps, biases, or weaknesses in the available evidence.
+
+Cite studies inline using their identifier in square brackets, e.g. [PMID12345678] \
+or [https://example.org/article], immediately after the claim they support. Cite \
+every study you rely on and do not invent studies or identifiers beyond those listed. \
+Be measured and evidence-based; do not overstate certainty.
+
+Research topic: {topic}
+
+Evaluated studies:
+{studies}"""
+
+# Appended verbatim to every synthesized report, in code — never left to the LLM.
+# Mirrors the disclaimer in docs/architecture.md: a study/research tool, not medical
+# advice, diagnosis, or treatment.
+_DISCLAIMER = (
+    "\n\n---\n\n"
+    "> ⚠️ **Disclaimer**: This is a study/research tool. It does **not** provide "
+    "medical advice, diagnosis, or treatment recommendations. Always consult a "
+    "qualified healthcare professional for medical decisions."
+)
+
+# Report emitted when there is no sufficient evidence to synthesize. The disclaimer
+# is appended to this too (in code), so every report carries it.
+_NO_EVIDENCE_REPORT = (
+    "## Summary\n\n"
+    "No sufficient evidence was found for **{topic}**. The search did not surface "
+    "studies that met the quality and relevance bar needed to draw conclusions.\n\n"
+    "## Key Findings\n\n"
+    "None. No qualifying studies were available to synthesize.\n\n"
+    "## Limitations\n\n"
+    "This absence of evidence is not evidence of absence: stronger or more targeted "
+    "searches, broader sources, or newer literature may surface relevant studies."
+)
+
+
+def _format_studies(evaluated_studies: Sequence[EvaluatedStudy]) -> str:
+    """Render the evaluated studies into a compact bullet list for the prompt.
+
+    Each line carries the fields the synthesizer needs to cite and weigh a study:
+    its ``identifier`` (the PMID or URL used for inline citations), ``study_type``,
+    ``sample_size`` (``n/a`` when unknown), and the one-sentence ``key_finding``.
+    """
+    lines: list[str] = []
+    for study in evaluated_studies:
+        sample = study.sample_size if study.sample_size is not None else "n/a"
+        lines.append(
+            f"- [{study.identifier}] type={study.study_type.value}, n={sample}: {study.key_finding}"
+        )
+    return "\n".join(lines)
+
+
+def make_synthesizer_node(llm: LLMPort) -> Callable[[AgentState], dict]:
+    """Build the ``synthesizer`` node bound to the given :class:`LLMPort`.
+
+    Reached once the self-correction loop finishes (the evidence was judged
+    sufficient or the iteration ceiling was hit). The returned callable reads
+    ``state["topic"]`` and ``state["evaluated_studies"]`` and asks the LLM for a
+    free-form, systematic-review-style Markdown report (Summary / Key Findings /
+    Limitations) with inline citations keyed to each study's ``identifier``. The
+    studies are formatted in code (:func:`_format_studies`) and interpolated into
+    the prompt so the model has the identifier, study type, sample size, and key
+    finding of each study to cite and weigh.
+
+    Two things are guaranteed in code, never left to the model: the fixed medical
+    :data:`_DISCLAIMER` is always appended to the report, and when there are no
+    evaluated studies the node short-circuits to an honest "no sufficient evidence"
+    report (:data:`_NO_EVIDENCE_REPORT`) instead of calling the LLM. Returns only
+    the key it changed: ``{"final_report": report_text}``.
+    """
+
+    def synthesizer(state: AgentState) -> dict:
+        topic = state["topic"]
+        evaluated_studies = state.get("evaluated_studies", [])
+
+        if not evaluated_studies:
+            report = _NO_EVIDENCE_REPORT.format(topic=topic)
+            return {"final_report": report + _DISCLAIMER}
+
+        prompt = _SYNTHESIZER_PROMPT.format(
+            topic=topic,
+            studies=_format_studies(evaluated_studies),
+        )
+        report = llm.generate(prompt)
+        return {"final_report": report + _DISCLAIMER}
+
+    return synthesizer

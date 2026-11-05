@@ -14,6 +14,7 @@ from medgent.application.graph.nodes import (
     make_fetch_evidence_node,
     make_planner_node,
     make_refine_queries_node,
+    make_synthesizer_node,
 )
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "make_fetch_evidence_node",
     "make_planner_node",
     "make_refine_queries_node",
+    "make_synthesizer_node",
     "route_after_evaluator",
 ]

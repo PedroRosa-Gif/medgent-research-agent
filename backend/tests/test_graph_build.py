@@ -130,6 +130,10 @@ def test_graph_finishes_without_looping_when_sufficient_on_first_pass() -> None:
     # refine never ran: a single pass through the loop.
     assert llm.refine_calls == 0
     assert llm.planner_calls == 1
+    # The synthesizer ran after "finish": the final report is populated and
+    # carries the appended disclaimer.
+    assert final["final_report"]
+    assert "Disclaimer" in final["final_report"]
 
 
 # --- loop-to-ceiling path ----------------------------------------------------
@@ -163,6 +167,10 @@ def test_graph_loops_until_ceiling_then_stops_when_never_sufficient() -> None:
     assert llm.planner_calls == 1
     assert llm.refine_calls == max_iterations - 1
     assert llm.evaluator_calls == max_iterations * 3
+    # Even on the ceiling path the run reaches the synthesizer and produces a
+    # report (the studies exist, they were just not relevant enough).
+    assert final["final_report"]
+    assert "Disclaimer" in final["final_report"]
 
 
 # --- checkpointer / thread persistence ---------------------------------------

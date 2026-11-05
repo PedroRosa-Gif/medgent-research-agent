@@ -6,3 +6,7 @@ of application behavior (e.g. run a research session).
 Dependency rule: use cases depend on ``domain`` and on ports (abstractions)
 only. They must never import concrete ``adapters``.
 """
+
+from medgent.application.use_cases.research_topic import ResearchTopicUseCase
+
+__all__ = ["ResearchTopicUseCase"]
