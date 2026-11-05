@@ -32,16 +32,21 @@ services:
       retries: 5
       # Give the server room to start before the first probe counts against it.
       start_period: 20s
-    # --- Optional GPU (disabled by default) ---------------------------------
-    # On Windows this needs Docker Desktop + WSL2 with the NVIDIA GPU driver.
-    # Uncomment to let Ollama use the GPU (much faster generation):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: ["gpu"]
+    # --- GPU acceleration ----------------------------------------------------
+    # Lets Ollama run the model on an NVIDIA GPU, which is dramatically faster
+    # than CPU (seconds vs minutes per generation). On Windows this needs Docker
+    # Desktop + WSL2 with the NVIDIA GPU driver; verify with:
+    #   docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+    #
+    # NO NVIDIA GPU? Comment out the whole `deploy:` block below — otherwise
+    # `docker compose up` fails trying to reserve a device that isn't there.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
 
   ollama-init:
     # Same image as the server; this one-shot container just pulls the model and
