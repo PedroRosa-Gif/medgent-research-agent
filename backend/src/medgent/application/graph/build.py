@@ -12,7 +12,7 @@ The loop (see ``docs/architecture.md`` §5)::
                               |                            |
                           refine_queries <----- refine ---+
                                                           |
-                                             finish ------+-> END
+                                     finish --> synthesizer --> END
 
 After ``evaluator`` the graph routes on :func:`route_after_evaluator`: when the
 evidence is sufficient *or* the iteration ceiling has been reached it goes to the
@@ -21,9 +21,10 @@ queries and loops back into ``fetch_evidence``. The ceiling
 (``iteration >= max_iterations``) guarantees termination even if the evidence
 never becomes sufficient.
 
-The "finish" branch currently wires straight to ``END``. That is exactly where
-the ``synthesizer`` node attaches in a later task — the final report node slots
-between the "finish" route and ``END`` without touching the loop.
+The "finish" branch routes to the ``synthesizer`` node, which compiles the
+evaluated studies into the final systematic-review-style report and then edges to
+``END``. The synthesizer sits outside the loop — it runs exactly once, after the
+loop settles — so it never affects termination.
 
 Dependency rule: this module lives in the application layer and may import
 langgraph and the node factories, but it must never import or construct a concrete
@@ -45,6 +46,7 @@ from medgent.application.graph.nodes import (
     make_fetch_evidence_node,
     make_planner_node,
     make_refine_queries_node,
+    make_synthesizer_node,
 )
 from medgent.domain.state import AgentState
 
@@ -74,10 +76,12 @@ def build_graph(
     llm: LLMPort,
     sources: Sequence[EvidenceRetrievalPort],
     *,
-    max_results_per_source: int = 10,
+    max_results_per_source: int = 8,
     min_studies: int = 3,
     quality_threshold: float = 0.6,
     heuristic_weight: float = 0.5,
+    max_studies_per_iteration: int = 12,
+    batch_size: int = 3,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Wire the research nodes into a compiled, checkpointed LangGraph.
@@ -85,14 +89,15 @@ def build_graph(
     The ports (``llm`` and the retrieval ``sources``) are injected into the node
     factories here; this function never touches a concrete adapter. The tuning
     parameters (``max_results_per_source``, ``min_studies``, ``quality_threshold``,
-    ``heuristic_weight``) are forwarded to the ``fetch_evidence`` and ``evaluator``
-    factories.
+    ``heuristic_weight``, ``max_studies_per_iteration``, ``batch_size``) are
+    forwarded to the ``fetch_evidence`` and ``evaluator`` factories.
 
     Topology — ``START -> planner -> fetch_evidence -> evaluator``, then a
-    conditional edge on :func:`route_after_evaluator`: ``"finish"`` goes to ``END``
-    (where the synthesizer node will later attach) and ``"refine"`` goes to
-    ``refine_queries``, which loops back to ``fetch_evidence``. The
-    ``iteration >= max_iterations`` ceiling in the router bounds the loop.
+    conditional edge on :func:`route_after_evaluator`: ``"finish"`` goes to
+    ``synthesizer`` (which compiles the final report and edges to ``END``) and
+    ``"refine"`` goes to ``refine_queries``, which loops back to
+    ``fetch_evidence``. The ``iteration >= max_iterations`` ceiling in the router
+    bounds the loop.
 
     Checkpointing — the graph is compiled with a checkpointer so runs are keyed by
     a ``thread_id`` (passed at invoke time via ``config``), giving step streaming,
@@ -118,9 +123,12 @@ def build_graph(
             min_studies=min_studies,
             quality_threshold=quality_threshold,
             heuristic_weight=heuristic_weight,
+            max_studies_per_iteration=max_studies_per_iteration,
+            batch_size=batch_size,
         ),
     )
     graph.add_node("refine_queries", make_refine_queries_node(llm))
+    graph.add_node("synthesizer", make_synthesizer_node(llm))
 
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "fetch_evidence")
@@ -128,8 +136,9 @@ def build_graph(
     graph.add_conditional_edges(
         "evaluator",
         route_after_evaluator,
-        {"finish": END, "refine": "refine_queries"},
+        {"finish": "synthesizer", "refine": "refine_queries"},
     )
     graph.add_edge("refine_queries", "fetch_evidence")
+    graph.add_edge("synthesizer", END)
 
     return graph.compile(checkpointer=checkpointer)

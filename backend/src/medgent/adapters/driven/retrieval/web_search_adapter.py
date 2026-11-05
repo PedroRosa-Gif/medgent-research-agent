@@ -61,6 +61,16 @@ def _import_ddgs() -> type[DDGS]:
     return DDGS
 
 
+def _is_no_results_error(exc: Exception) -> bool:
+    """Tell apart ddgs's "nothing matched" signal from a real backend failure.
+
+    ``ddgs`` raises ``DDGSException("No results found.")`` for an empty result set
+    rather than returning ``[]``. That is a normal outcome, not a transient error,
+    so it should map to an empty list without burning retries.
+    """
+    return "no results found" in str(exc).casefold()
+
+
 class WebSearchAdapter:
     """``EvidenceRetrievalPort`` backed by a DuckDuckGo text search (via ``ddgs``).
 
@@ -123,6 +133,11 @@ class WebSearchAdapter:
                     max_results=max_results,
                 )
             except Exception as exc:  # noqa: BLE001 - normalized into WebSearchError
+                # ddgs raises instead of returning an empty list when a query
+                # simply matches nothing. That is an expected "no results" case,
+                # not a transient backend failure — don't retry, just return [].
+                if _is_no_results_error(exc):
+                    return []
                 last_error = exc
             else:
                 return list(results) if results else []

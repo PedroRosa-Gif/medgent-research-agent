@@ -71,11 +71,48 @@ class Evidence(BaseModel):
         return value
 
 
+class StudyExtraction(BaseModel):
+    """The fields the LLM is asked to extract from a single study.
+
+    This is the schema handed to the LLM via ``with_structured_output``. It
+    deliberately omits the two fields the application controls and must never ask
+    the model for: the ``identifier`` (copied from the source :class:`Evidence`)
+    and the ``quality_score`` (computed in code from the heuristic blended with
+    ``relevance_score``). Keeping those out of the extraction schema stops a small
+    model from emitting an out-of-range ``quality_score`` and failing validation
+    before the application can set the real value.
+    """
+
+    study_type: StudyType
+    sample_size: int | None = Field(default=None, ge=0)
+    key_finding: str
+    relevance_score: float = Field(ge=0.0, le=1.0)
+
+
+class StudyBatchExtraction(BaseModel):
+    """What the LLM returns when several studies are extracted in one call.
+
+    The evaluator node batches studies to cut the number of LLM round-trips: it
+    presents a numbered list of studies and asks the model for a
+    :class:`StudyExtraction` for each. ``studies`` holds those extractions in the
+    SAME ORDER as the studies were presented, so the node can zip them back onto
+    the source :class:`Evidence` records positionally. Like :class:`StudyExtraction`
+    this schema deliberately omits the ``identifier`` and ``quality_score`` the
+    application owns. An empty list is valid (the node treats a batch whose count
+    does not match the inputs as a failure and falls back to one-at-a-time).
+    """
+
+    studies: list[StudyExtraction]
+
+
 class EvaluatedStudy(BaseModel):
     """The structured assessment produced by the evaluator node.
 
     Each instance is derived from a single :class:`Evidence` record, linked back
-    to it via ``identifier``. The two scores capture different things:
+    to it via ``identifier``. The semantic fields come from a
+    :class:`StudyExtraction` (the LLM's output); ``identifier`` and
+    ``quality_score`` are set by the application, never by the model. The two
+    scores capture different things:
 
     - ``relevance_score``: how relevant the study is to the research topic, as
       judged by the LLM.

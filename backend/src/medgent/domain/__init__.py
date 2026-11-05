@@ -13,6 +13,8 @@ from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
+    StudyExtraction,
     StudyType,
 )
 from medgent.domain.scoring import combine_scores, heuristic_score
@@ -24,6 +26,8 @@ __all__ = [
     "Evidence",
     "EvidenceSource",
     "QueryPlan",
+    "StudyBatchExtraction",
+    "StudyExtraction",
     "StudyType",
     "combine_scores",
     "heuristic_score",

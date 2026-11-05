@@ -1,12 +1,12 @@
 """Tests for the evaluator graph node — pure, offline, no provider SDK.
 
 Uses a ``QueueLLM`` double whose ``generate_structured`` yields canned
-:class:`EvaluatedStudy` objects (one per call, in order) so each study gets a
-distinct relevance. The tests pin the node contract: it overrides the LLM's
-``identifier`` (from the source :class:`Evidence`) and ``quality_score`` (from
-the combined heuristic/relevance computation), decides sufficiency by
-threshold-plus-count, always increments ``iteration``, and skips a study whose
-extraction raises.
+:class:`StudyExtraction` objects (one per call, in order) so each study gets a
+distinct relevance. The LLM is asked ONLY for the extraction fields; the node
+then builds the final :class:`EvaluatedStudy`, setting the ``identifier`` from
+the source :class:`Evidence` and computing ``quality_score`` in code. The tests
+pin that contract, plus sufficiency by threshold-plus-count, iteration
+increment, and skipping a study whose extraction raises.
 """
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ from __future__ import annotations
 from datetime import date
 
 from medgent.application.graph import make_evaluator_node
-from medgent.domain.schemas import EvaluatedStudy, Evidence, EvidenceSource, StudyType
+from medgent.domain.schemas import (
+    Evidence,
+    EvidenceSource,
+    StudyBatchExtraction,
+    StudyExtraction,
+    StudyType,
+)
 from medgent.domain.scoring import combine_scores, heuristic_score
 from medgent.domain.state import initial_state
 
@@ -22,22 +28,54 @@ _LONG_ABSTRACT = "y" * 400
 
 
 class QueueLLM:
-    """``LLMPort`` double returning queued :class:`EvaluatedStudy` per call.
+    """``LLMPort`` double returning queued extractions per structured call.
 
-    Each ``generate_structured`` call pops the next canned study from the queue.
-    A queued ``RuntimeError`` (rather than a study) is raised instead, to exercise
-    the node's per-study failure handling.
+    The queue holds the extractions the node should receive, one per *study*, in
+    order. ``generate_structured`` branches on ``schema``:
+
+    - ``StudyExtraction`` (single path): pop one extraction and return it.
+    - ``StudyBatchExtraction`` (batch path): pop ``batch_size`` extractions and
+      wrap them in a :class:`StudyBatchExtraction` (the batch count is inferred
+      from the node's ``batch_size``, recorded on the fake).
+
+    A queued ``Exception`` is raised instead of being returned, to exercise the
+    node's failure handling. For the batch path a single ``Exception`` entry at
+    the head of the queue makes the whole batch call raise.
     """
 
-    def __init__(self, responses: list[EvaluatedStudy | Exception]) -> None:
+    def __init__(
+        self,
+        responses: list[StudyExtraction | Exception],
+        *,
+        batch_size: int = 1,
+    ) -> None:
         self._responses = list(responses)
+        self._batch_size = batch_size
         self.prompts: list[str] = []
+        self.single_calls = 0
+        self.batch_calls = 0
 
     def generate(self, prompt: str) -> str:
         return f"echo: {prompt}"
 
     def generate_structured(self, prompt: str, schema: type) -> object:
         self.prompts.append(prompt)
+        if schema is StudyBatchExtraction:
+            self.batch_calls += 1
+            # A leading Exception makes the batch call itself raise.
+            if self._responses and isinstance(self._responses[0], Exception):
+                raise self._responses.pop(0)
+            studies: list[StudyExtraction] = []
+            for _ in range(self._batch_size):
+                if not self._responses:
+                    break
+                response = self._responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                studies.append(response)
+            return StudyBatchExtraction(studies=studies)
+
+        self.single_calls += 1
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -55,37 +93,29 @@ def _evidence(identifier: str, *, abstract: str | None = None, year: int | None 
     )
 
 
-def _study(
+def _extraction(
     *,
-    identifier: str = "LLM-SHOULD-NOT-BE-TRUSTED",
     relevance: float,
-    quality: float = 0.999,
     study_type: StudyType = StudyType.RCT,
     sample_size: int | None = 100,
     key_finding: str = "a finding",
-) -> EvaluatedStudy:
-    """Build a canned LLM-returned :class:`EvaluatedStudy`.
-
-    Defaults deliberately set a bogus ``identifier`` and ``quality_score`` so the
-    tests can assert the node overrides both.
-    """
-    return EvaluatedStudy(
-        identifier=identifier,
+) -> StudyExtraction:
+    """Build a canned LLM-returned :class:`StudyExtraction` (semantic fields only)."""
+    return StudyExtraction(
         study_type=study_type,
         sample_size=sample_size,
         key_finding=key_finding,
         relevance_score=relevance,
-        quality_score=quality,
     )
 
 
-# --- field overriding --------------------------------------------------------
+# --- building the final study ------------------------------------------------
 
 
-def test_evaluator_overrides_identifier_and_quality_score() -> None:
+def test_evaluator_sets_identifier_and_computes_quality_score() -> None:
     current_year = date.today().year
     evidence = _evidence("pmid-42", abstract=_LONG_ABSTRACT, year=current_year)
-    llm = QueueLLM([_study(identifier="bogus", relevance=0.8, quality=0.01)])
+    llm = QueueLLM([_extraction(relevance=0.8)])
     evaluator = make_evaluator_node(llm)
 
     state = initial_state("metformin safety")
@@ -93,12 +123,11 @@ def test_evaluator_overrides_identifier_and_quality_score() -> None:
     update = evaluator(state)
 
     [study] = update["evaluated_studies"]
-    # identifier taken from the Evidence, not the LLM's bogus value.
+    # identifier comes from the Evidence (the extraction schema has no identifier).
     assert study.identifier == "pmid-42"
-    # quality_score recomputed in code, not the LLM's bogus 0.01.
+    # quality_score is computed in code from heuristic + relevance.
     expected = combine_scores(heuristic_score(evidence), 0.8, heuristic_weight=0.5)
     assert study.quality_score == expected
-    assert study.quality_score != 0.01
     # semantic fields are kept from the LLM.
     assert study.relevance_score == 0.8
     assert study.study_type == StudyType.RCT
@@ -107,7 +136,7 @@ def test_evaluator_overrides_identifier_and_quality_score() -> None:
 
 def test_evaluator_prompt_includes_topic_and_study() -> None:
     evidence = _evidence("pmid-1", abstract="abc")
-    llm = QueueLLM([_study(relevance=0.5)])
+    llm = QueueLLM([_extraction(relevance=0.5)])
     evaluator = make_evaluator_node(llm)
 
     state = initial_state("SGLT2 inhibitors in heart failure")
@@ -131,8 +160,8 @@ def test_evaluator_sufficient_when_enough_studies_pass_threshold() -> None:
         _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
     ]
     # Each heuristic is 1.0; relevance 1.0 => quality 1.0 >= 0.6 for all three.
-    llm = QueueLLM([_study(relevance=1.0) for _ in evidence])
-    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6)
+    llm = QueueLLM([_extraction(relevance=1.0) for _ in evidence])
+    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -153,12 +182,12 @@ def test_evaluator_insufficient_when_too_few_pass_threshold() -> None:
     # Only the first two are relevant enough to clear the threshold.
     llm = QueueLLM(
         [
-            _study(relevance=1.0),
-            _study(relevance=1.0),
-            _study(relevance=0.0),
+            _extraction(relevance=1.0),
+            _extraction(relevance=1.0),
+            _extraction(relevance=0.0),
         ]
     )
-    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6)
+    evaluator = make_evaluator_node(llm, min_studies=3, quality_threshold=0.6, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -172,7 +201,7 @@ def test_evaluator_insufficient_when_too_few_pass_threshold() -> None:
 
 def test_evaluator_increments_iteration_from_current() -> None:
     evidence = _evidence("a", abstract=_LONG_ABSTRACT, year=date.today().year)
-    llm = QueueLLM([_study(relevance=1.0)])
+    llm = QueueLLM([_extraction(relevance=1.0)])
     evaluator = make_evaluator_node(llm)
 
     state = initial_state("topic")
@@ -223,12 +252,12 @@ def test_evaluator_skips_study_whose_extraction_raises() -> None:
     # The middle call raises; the other two extract normally.
     llm = QueueLLM(
         [
-            _study(relevance=1.0),
+            _extraction(relevance=1.0),
             RuntimeError("model blew up"),
-            _study(relevance=1.0),
+            _extraction(relevance=1.0),
         ]
     )
-    evaluator = make_evaluator_node(llm)
+    evaluator = make_evaluator_node(llm, batch_size=1)
 
     state = initial_state("topic")
     state["evidence"] = evidence
@@ -237,3 +266,123 @@ def test_evaluator_skips_study_whose_extraction_raises() -> None:
     identifiers = [s.identifier for s in update["evaluated_studies"]]
     assert identifiers == ["good-1", "good-2"]
     assert update["iteration"] == 1
+
+
+# --- batch path --------------------------------------------------------------
+
+
+def test_evaluator_batch_happy_path_one_call_three_studies() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    llm = QueueLLM(
+        [
+            _extraction(relevance=1.0),
+            _extraction(relevance=0.9),
+            _extraction(relevance=0.8),
+        ],
+        batch_size=3,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # Exactly one batch call, no single-study calls.
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 0
+
+    studies = update["evaluated_studies"]
+    assert len(studies) == 3
+    # Identifiers are pinned from the Evidence in presentation order, and each
+    # quality_score is computed in code from heuristic + the returned relevance.
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+    for ev, study, relevance in zip(evidence, studies, (1.0, 0.9, 0.8), strict=True):
+        expected = combine_scores(heuristic_score(ev), relevance, heuristic_weight=0.5)
+        assert study.quality_score == expected
+        assert study.relevance_score == relevance
+    assert update["iteration"] == 1
+
+
+def test_evaluator_batch_wrong_count_falls_back_to_single() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    # The fake is told batch_size=2 while the node uses batch_size=3, so the batch
+    # call returns only 2 extractions for a chunk of 3 => count mismatch. The
+    # queue keeps enough extractions for the subsequent one-at-a-time fallback.
+    llm = QueueLLM(
+        [_extraction(relevance=1.0) for _ in range(5)],
+        batch_size=2,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # One batch call (mismatch) then three single-study fallback calls.
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 3
+    studies = update["evaluated_studies"]
+    assert len(studies) == 3
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+
+
+def test_evaluator_batch_exception_falls_back_to_single() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("c", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    # A leading Exception makes the batch call raise; the three extractions after
+    # it feed the one-at-a-time fallback.
+    llm = QueueLLM(
+        [
+            RuntimeError("batch blew up"),
+            _extraction(relevance=1.0),
+            _extraction(relevance=1.0),
+            _extraction(relevance=1.0),
+        ],
+        batch_size=3,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=3)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    assert llm.batch_calls == 1
+    assert llm.single_calls == 3
+    studies = update["evaluated_studies"]
+    assert [s.identifier for s in studies] == ["a", "b", "c"]
+
+
+def test_evaluator_batch_size_one_uses_single_path_only() -> None:
+    current_year = date.today().year
+    evidence = [
+        _evidence("a", abstract=_LONG_ABSTRACT, year=current_year),
+        _evidence("b", abstract=_LONG_ABSTRACT, year=current_year),
+    ]
+    llm = QueueLLM(
+        [_extraction(relevance=1.0), _extraction(relevance=1.0)],
+        batch_size=1,
+    )
+    evaluator = make_evaluator_node(llm, batch_size=1)
+
+    state = initial_state("topic")
+    state["evidence"] = evidence
+    update = evaluator(state)
+
+    # batch_size == 1 never requests StudyBatchExtraction.
+    assert llm.batch_calls == 0
+    assert llm.single_calls == 2
+    assert len(update["evaluated_studies"]) == 2

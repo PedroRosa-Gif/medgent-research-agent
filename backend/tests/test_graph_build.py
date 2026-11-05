@@ -14,12 +14,15 @@ persistence via ``get_state``.
 
 from __future__ import annotations
 
+import re
+
 from medgent.application.graph import build_graph
 from medgent.domain.schemas import (
-    EvaluatedStudy,
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
+    StudyExtraction,
     StudyType,
 )
 from medgent.domain.state import initial_state
@@ -27,14 +30,25 @@ from medgent.domain.state import initial_state
 _LONG_ABSTRACT = "y" * 400
 
 
+def _count_numbered_studies(prompt: str) -> int:
+    """Count the ``N. Title:`` entries in a batch evaluator prompt.
+
+    The batch prompt lists each study as ``"<n>. Title: ..."``; counting those
+    lines tells the fake how many extractions the node expects back.
+    """
+    return len(re.findall(r"(?m)^\d+\.\s", prompt))
+
+
 class FakeLLM:
     """``LLMPort`` double returning canned structured output per schema.
 
     Planner and refine call ``generate_structured(prompt, QueryPlan)``; the
-    evaluator calls it with ``EvaluatedStudy``. The fake branches on ``schema`` to
-    return the right canned type, and counts how many times refine (i.e. a
-    ``QueryPlan`` request carrying the refine prompt marker) was asked for so tests
-    can assert loop behaviour.
+    evaluator calls it with either ``StudyExtraction`` (single path) or
+    ``StudyBatchExtraction`` (batch path). The fake branches on ``schema`` to
+    return the right canned type — for a batch it returns the canned study
+    repeated to match the number of studies in the prompt — and counts how many
+    times refine (a ``QueryPlan`` request carrying the refine prompt marker) and
+    the evaluator were asked for so tests can assert loop behaviour.
     """
 
     def __init__(
@@ -42,7 +56,7 @@ class FakeLLM:
         *,
         plan: QueryPlan,
         refine_plan: QueryPlan,
-        study: EvaluatedStudy,
+        study: StudyExtraction,
     ) -> None:
         self._plan = plan
         self._refine_plan = refine_plan
@@ -63,7 +77,11 @@ class FakeLLM:
                 return self._refine_plan
             self.planner_calls += 1
             return self._plan
-        if schema is EvaluatedStudy:
+        if schema is StudyBatchExtraction:
+            count = _count_numbered_studies(prompt)
+            self.evaluator_calls += count
+            return StudyBatchExtraction(studies=[self._study for _ in range(count)])
+        if schema is StudyExtraction:
             self.evaluator_calls += 1
             return self._study
         raise AssertionError(f"unexpected schema requested: {schema!r}")
@@ -92,15 +110,13 @@ def _evidence(identifier: str) -> Evidence:
     )
 
 
-def _study(relevance: float) -> EvaluatedStudy:
-    """Build a canned evaluator output; identifier/quality are overridden by node."""
-    return EvaluatedStudy(
-        identifier="ignored",
+def _study(relevance: float) -> StudyExtraction:
+    """Build a canned evaluator extraction; identifier/quality are set by the node."""
+    return StudyExtraction(
         study_type=StudyType.RCT,
         sample_size=100,
         key_finding="a finding",
         relevance_score=relevance,
-        quality_score=0.0,
     )
 
 
@@ -130,6 +146,10 @@ def test_graph_finishes_without_looping_when_sufficient_on_first_pass() -> None:
     # refine never ran: a single pass through the loop.
     assert llm.refine_calls == 0
     assert llm.planner_calls == 1
+    # The synthesizer ran after "finish": the final report is populated and
+    # carries the appended disclaimer.
+    assert final["final_report"]
+    assert "Disclaimer" in final["final_report"]
 
 
 # --- loop-to-ceiling path ----------------------------------------------------
@@ -163,6 +183,10 @@ def test_graph_loops_until_ceiling_then_stops_when_never_sufficient() -> None:
     assert llm.planner_calls == 1
     assert llm.refine_calls == max_iterations - 1
     assert llm.evaluator_calls == max_iterations * 3
+    # Even on the ceiling path the run reaches the synthesizer and produces a
+    # report (the studies exist, they were just not relevant enough).
+    assert final["final_report"]
+    assert "Disclaimer" in final["final_report"]
 
 
 # --- checkpointer / thread persistence ---------------------------------------
