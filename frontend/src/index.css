@@ -1,0 +1,118 @@
+@import 'tailwindcss';
+
+/*
+ * MedGent theme — primary language is design_v2 (Linear / Changelog):
+ * near-black canvas, layered gray surfaces, 1px hairline borders, no drop
+ * shadows, Inter with negative tracking and half-step weights (510 / 590),
+ * pill outlined buttons. Dark mode is the ONLY mode.
+ *
+ * Single chromatic accent: a muted clinical teal, used ONLY for the active
+ * reasoning node (pulse) and for citation links. Everything else is monochrome.
+ */
+@theme {
+  /* Surfaces (one step lighter each) */
+  --color-onyx: #08090a;
+  --color-carbon: #141516;
+  --color-graphite: #1c1c1f;
+  --color-smoke: #23252a;
+  --color-iron: #2d2e31;
+
+  /* Borders */
+  --color-ash-border: #34343a;
+  --color-ferrite-border: #3e3e44;
+
+  /* Text */
+  --color-steel-text: #62666d;
+  --color-fog-text: #8a8f98;
+  --color-mist-text: #d0d6e0;
+  --color-snow: #f7f8f8;
+
+  /* Single accent — muted clinical teal */
+  --color-teal: #2dd4bf;
+  --color-teal-soft: #5eead4;
+
+  --font-sans:
+    'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Half-step weights are the signature; 600/700 are intentionally absent. */
+  --font-weight-w510: 510;
+  --font-weight-w590: 590;
+}
+
+/* Inter via @fontsource (bundled, offline-friendly). */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-onyx);
+    color: var(--color-snow);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.012em;
+  }
+
+  /* 510/590 are variable-only; the static fontsource files ship 400/500/600,
+     so map the half-steps onto the nearest static face for a tight rhythm. */
+  .font-w510 {
+    font-weight: 500;
+    letter-spacing: -0.013em;
+  }
+  .font-w590 {
+    font-weight: 600;
+    letter-spacing: -0.014em;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-teal) 30%, transparent);
+    color: var(--color-snow);
+  }
+}
+
+@layer components {
+  /* Active-node pulse — the only animated chromatic accent. */
+  @keyframes teal-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-teal) 45%, transparent);
+      opacity: 1;
+    }
+    50% {
+      box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-teal) 0%, transparent);
+      opacity: 0.75;
+    }
+  }
+  .pulse-teal {
+    animation: teal-pulse 1.6s ease-in-out infinite;
+  }
+
+  /* Blinking caret shown while the report types out. */
+  @keyframes caret-blink {
+    0%,
+    49% {
+      opacity: 1;
+    }
+    50%,
+    100% {
+      opacity: 0;
+    }
+  }
+  .caret-blink {
+    animation: caret-blink 1s step-end infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-teal,
+    .caret-blink {
+      animation: none;
+    }
+  }
+}
