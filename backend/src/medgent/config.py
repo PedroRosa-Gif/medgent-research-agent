@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     ncbi_api_key: str | None = None
     langsmith_api_key: str | None = None
 
+    # Browser origins allowed to call the HTTP API (CORS). Defaults to the Vite
+    # dev server on both loopback hostnames so the React UI (Task 11b) works out
+    # of the box. Override via the ``CORS_ORIGINS`` env var — pydantic-settings
+    # parses a JSON array (e.g. '["https://app.example.com"]').
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
 
 @lru_cache
 def get_settings() -> Settings:
