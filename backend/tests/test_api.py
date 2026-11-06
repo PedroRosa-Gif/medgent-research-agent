@@ -17,12 +17,15 @@ real token streaming requires a streaming LLM (Ollama), exercised manually.
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from medgent.adapters.driving.api.app import create_app, get_use_case
-from medgent.application.use_cases import ResearchTopicUseCase
+from medgent.application.use_cases import EventKind, ResearchEvent, ResearchTopicUseCase
 from medgent.config import Settings
 from medgent.domain.schemas import (
     Evidence,
@@ -192,6 +195,138 @@ def test_stream_emits_step_and_done(client: TestClient) -> None:
 def test_stream_rejects_empty_topic(client: TestClient) -> None:
     response = client.get("/research/stream", params={"topic": ""})
     assert response.status_code == 422
+
+
+# --- GET /research/stream: off-thread bridge (scripted fake use case) --------
+
+
+class ScriptedUseCase:
+    """A ``ResearchTopicUseCase`` double exposing only ``stream_events``.
+
+    Its ``stream_events`` is a blocking sync generator (like the real one) that
+    replays a scripted list of :class:`ResearchEvent` values, optionally sleeping
+    between yields to mimic slow blocking work, and optionally raising partway
+    through. It records the thread it iterates on so a test can prove the bridge
+    drives it off the request-handler thread. Only the SSE path uses it, so the
+    other methods are intentionally absent.
+    """
+
+    def __init__(
+        self,
+        events: list[ResearchEvent],
+        *,
+        sleep: float = 0.0,
+        raise_after: int | None = None,
+    ) -> None:
+        self._events = events
+        self._sleep = sleep
+        self._raise_after = raise_after
+        self.iter_thread_id: int | None = None
+
+    def stream_events(
+        self,
+        topic: str,
+        *,
+        max_iterations: int | None = None,
+        thread_id: str | None = None,
+    ) -> Iterator[ResearchEvent]:
+        self.iter_thread_id = threading.get_ident()
+        for index, event in enumerate(self._events):
+            if self._raise_after is not None and index == self._raise_after:
+                raise RuntimeError("boom")
+            if self._sleep:
+                time.sleep(self._sleep)
+            yield event
+
+
+def _scripted_events() -> list[ResearchEvent]:
+    """A known ordered sequence: planner step, a token, then synthesizer step."""
+    return [
+        ResearchEvent(EventKind.STEP, "planner", {"queries": ["q1", "q2"]}),
+        ResearchEvent(EventKind.TOKEN, "synthesizer", "Hello "),
+        ResearchEvent(EventKind.TOKEN, "synthesizer", "world"),
+        ResearchEvent(
+            EventKind.STEP,
+            "synthesizer",
+            {"final_report": "## Report\n\nbody"},
+        ),
+    ]
+
+
+def _client_for(use_case: object) -> TestClient:
+    app = create_app(Settings())
+    app.dependency_overrides[get_use_case] = lambda: use_case
+    return TestClient(app)
+
+
+def test_stream_preserves_order_and_ends_with_done() -> None:
+    fake = ScriptedUseCase(_scripted_events())
+    client = _client_for(fake)
+
+    response = client.get("/research/stream", params={"topic": "t"})
+    assert response.status_code == 200
+
+    events = _parse_sse(response.text)
+    names = [name for name, _ in events]
+
+    assert names == ["step", "token", "token", "step", "done"]
+    assert events[0][1]["node"] == "planner"
+    assert events[1][1] == {"node": "synthesizer", "text": "Hello "}
+    assert events[2][1] == {"node": "synthesizer", "text": "world"}
+    assert events[3][1]["node"] == "synthesizer"
+
+    done = events[-1][1]
+    assert done["topic"] == "t"
+    assert done["report"] == "## Report\n\nbody"
+
+
+def test_stream_emits_error_event_on_exception() -> None:
+    # Raise after the first event so we see one good event then the error.
+    fake = ScriptedUseCase(_scripted_events(), raise_after=1)
+    client = _client_for(fake)
+
+    response = client.get("/research/stream", params={"topic": "t"})
+    assert response.status_code == 200
+
+    events = _parse_sse(response.text)
+    names = [name for name, _ in events]
+
+    assert names[0] == "step"
+    assert names[-1] == "error"
+    assert "done" not in names
+    error = events[-1][1]
+    assert error["error"] == "RuntimeError"
+    assert error["detail"] == "boom"
+
+
+def test_stream_drives_slow_sync_generator_without_blocking() -> None:
+    # A slow blocking generator: under the old inline-blocking approach this held
+    # the event loop; the off-thread bridge delivers every event in order.
+    fake = ScriptedUseCase(_scripted_events(), sleep=0.05)
+    client = _client_for(fake)
+
+    start = time.monotonic()
+    response = client.get("/research/stream", params={"topic": "t"})
+    elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    assert elapsed < 5  # generous ceiling; the real work is ~0.2s of sleeps
+
+    names = [name for name, _ in _parse_sse(response.text)]
+    assert names == ["step", "token", "token", "step", "done"]
+
+
+def test_stream_runs_sync_generator_off_the_request_thread() -> None:
+    fake = ScriptedUseCase(_scripted_events())
+    client = _client_for(fake)
+
+    response = client.get("/research/stream", params={"topic": "t"})
+    assert response.status_code == 200
+
+    # The scripted generator records the thread it iterated on; the bridge must
+    # run it in a worker thread, not the current (test) thread.
+    assert fake.iter_thread_id is not None
+    assert fake.iter_thread_id != threading.get_ident()
 
 
 # --- CORS --------------------------------------------------------------------

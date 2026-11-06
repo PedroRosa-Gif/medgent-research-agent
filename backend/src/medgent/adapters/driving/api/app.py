@@ -16,9 +16,12 @@ only HTTP ↔ use-case translation and SSE framing.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import TYPE_CHECKING, Annotated
 
+import anyio
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -34,6 +37,13 @@ from medgent.config import Settings, get_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from medgent.application.use_cases import ResearchEvent
+
+# Sentinel pushed onto the bridge queue by the worker thread to mark the end of
+# the sync generator (clean exhaustion). A distinct object so it can never be
+# confused with a real ``ResearchEvent``.
+_STREAM_DONE = object()
 
 
 def get_use_case() -> ResearchTopicUseCase:
@@ -154,6 +164,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+async def _aiter_events(
+    use_case: ResearchTopicUseCase,
+    topic: str,
+    max_iterations: int | None,
+) -> AsyncIterator[ResearchEvent]:
+    """Drive the sync ``stream_events`` generator off-thread, yielding async.
+
+    The use case's :meth:`~ResearchTopicUseCase.stream_events` is a *blocking*
+    generator: it pumps LangGraph's synchronous ``graph.stream(...)``, which in
+    turn makes blocking LLM/retrieval calls. Iterating it directly inside the
+    ``async def`` SSE generator would hold the asyncio event loop for the whole
+    run, so ``sse-starlette`` could neither flush events nor send heartbeat pings
+    until the run finished — clients time out.
+
+    This bridge runs the sync iteration in a worker thread (via
+    :func:`anyio.to_thread.run_sync`, the idiomatic Starlette choice) and hands
+    each item to the event loop through an :class:`asyncio.Queue`, pushed with
+    ``loop.call_soon_threadsafe`` so the queue is only ever mutated on the loop
+    thread. The worker pushes a sentinel on clean exhaustion or the raised
+    exception on failure; the async side re-raises that exception so the caller's
+    existing ``error`` event path still fires.
+
+    Cancellation/disconnect behavior: if the client disconnects, the async
+    generator is closed and this coroutine is cancelled. We cannot forcibly stop a
+    sync generator mid-iteration from another thread, so the worker thread is
+    allowed to run to completion in the background (its final queue pushes become
+    no-ops once no consumer awaits them). Runs are bounded by ``max_iterations``,
+    so the thread terminates on its own; this keeps the implementation simple and
+    correct without wedging the process.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[object] = asyncio.Queue()
+
+    def _pump() -> None:
+        """Run on the worker thread: iterate the sync generator into the queue."""
+        try:
+            for event in use_case.stream_events(topic, max_iterations=max_iterations):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except BaseException as exc:  # noqa: BLE001 - forward to the async side
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        else:
+            loop.call_soon_threadsafe(queue.put_nowait, _STREAM_DONE)
+
+    worker = asyncio.ensure_future(anyio.to_thread.run_sync(_pump))
+    try:
+        while True:
+            item = await queue.get()
+            if item is _STREAM_DONE:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item  # type: ignore[misc]  # item is a ResearchEvent here
+    finally:
+        # Surface a worker failure that happened *after* the loop broke, and make
+        # sure the background task is awaited so it does not leak.
+        if not worker.done():
+            worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await worker
+
+
 async def _event_stream(
     use_case: ResearchTopicUseCase,
     topic: str,
@@ -161,11 +232,13 @@ async def _event_stream(
 ) -> AsyncIterator[dict]:
     """Yield SSE events (``{"event", "data"}`` dicts) for one research run.
 
-    Bridges the use case's synchronous :meth:`~ResearchTopicUseCase.stream_events`
-    generator into an async SSE stream. ``step`` and ``token`` events are relayed
-    as they arrive; the final synthesizer step provides the report and studies for
-    the terminal ``done`` event. Any exception is reported as an ``error`` event
-    rather than crashing the connection.
+    Consumes the :func:`_aiter_events` async bridge, which drives the use case's
+    synchronous :meth:`~ResearchTopicUseCase.stream_events` generator on a worker
+    thread so the event loop stays free to flush events and send heartbeats.
+    ``step`` and ``token`` events are relayed as they arrive; the final synthesizer
+    step provides the report and studies for the terminal ``done`` event. Any
+    exception is reported as an ``error`` event rather than crashing the
+    connection.
 
     Event contract (``event`` name → JSON ``data``):
 
@@ -178,7 +251,7 @@ async def _event_stream(
     iterations = 0
     studies: list = []
     try:
-        for event in use_case.stream_events(topic, max_iterations=max_iterations):
+        async for event in _aiter_events(use_case, topic, max_iterations):
             if event.kind is EventKind.STEP:
                 update = event.payload
                 if event.node == "synthesizer":
