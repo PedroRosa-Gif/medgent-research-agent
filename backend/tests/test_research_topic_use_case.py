@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from medgent.application.use_cases import ResearchTopicUseCase
+from medgent.application.use_cases import EventKind, ResearchTopicUseCase
 from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
@@ -116,6 +116,26 @@ def test_stream_yields_expected_node_sequence() -> None:
     assert len(updates["fetch_evidence"]["evidence"]) == 3
     assert updates["evaluator"]["is_sufficient"] is True
     assert updates["synthesizer"]["final_report"]
+
+
+def test_stream_events_emits_node_start_before_each_step() -> None:
+    use_case = _use_case()
+
+    events = list(use_case.stream_events("metformin efficacy", thread_id="t-events"))
+
+    # Every STEP must be preceded by a NODE_START for the same node (a node starts
+    # before it finishes), so a UI can render the active node as "thinking".
+    starts = [e.node for e in events if e.kind is EventKind.NODE_START]
+    steps = [e.node for e in events if e.kind is EventKind.STEP]
+    assert starts == ["planner", "fetch_evidence", "evaluator", "synthesizer"]
+    assert steps == ["planner", "fetch_evidence", "evaluator", "synthesizer"]
+
+    # NODE_START payloads are empty dicts.
+    assert all(e.payload == {} for e in events if e.kind is EventKind.NODE_START)
+
+    # Ordering: the planner's start comes before the planner's step.
+    kinds = [(e.kind, e.node) for e in events]
+    assert kinds.index((EventKind.NODE_START, "planner")) < kinds.index((EventKind.STEP, "planner"))
 
 
 def test_runs_are_isolated_by_generated_thread_id() -> None:

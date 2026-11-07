@@ -242,17 +242,25 @@ async def _event_stream(
 
     Event contract (``event`` name → JSON ``data``):
 
-    - ``step``  → ``{"node", "summary", "keys", "data"}``
-    - ``token`` → ``{"node": "synthesizer", "text"}``
-    - ``done``  → ``{"topic", "report", "iterations", "studies"}``
-    - ``error`` → ``{"error", "detail"}``
+    - ``node_start`` → ``{"node"}``
+    - ``step``       → ``{"node", "summary", "keys", "data"}``
+    - ``token``      → ``{"node": "synthesizer", "text"}``
+    - ``done``       → ``{"topic", "report", "iterations", "studies"}``
+    - ``error``      → ``{"error", "detail"}``
     """
     final_report = ""
     iterations = 0
     studies: list = []
     try:
         async for event in _aiter_events(use_case, topic, max_iterations):
-            if event.kind is EventKind.STEP:
+            if event.kind is EventKind.NODE_START:
+                # A node began running (before it produced output); let the UI show
+                # the active step as "thinking".
+                yield {
+                    "event": "node_start",
+                    "data": json.dumps({"node": event.node}),
+                }
+            elif event.kind is EventKind.STEP:
                 update = event.payload
                 if event.node == "synthesizer":
                     final_report = update.get("final_report", final_report)

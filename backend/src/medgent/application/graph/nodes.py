@@ -41,22 +41,36 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# Default ceiling on how many queries the planner / refine step may emit. The
+# cap is what actually bounds a run's cost: each query fans out across every
+# retrieval source (``max_results_per_source`` papers each), so an uncapped plan
+# of dozens of queries multiplies into hundreds of papers and a multi-minute run.
+# The prompts also *ask* for at most this many, but the code truncation below is
+# the guarantee — it holds regardless of what the model actually returns.
+_DEFAULT_MAX_QUERIES = 5
+
 # Planner prompt template. The LLM decomposes one clinical research topic into a
 # small set of focused sub-queries spanning distinct axes (mechanism of action,
 # efficacy, adverse effects, ...) phrased with appropriate medical terminology so
-# they search well against PubMed/MeSH and the web.
+# they search well against PubMed/MeSH and the web. The "at most five" instruction
+# reinforces the hard cap applied in code (see ``make_planner_node``).
 _PLANNER_PROMPT = """You are a clinical research librarian planning a literature search.
 
-Decompose the research topic below into a set of focused, non-overlapping search \
-queries suitable for PubMed and general web search. Span distinct clinical axes \
-such as mechanism of action, efficacy and clinical outcomes, and adverse effects \
-and safety. Use precise medical terminology (including MeSH-style terms where \
-appropriate) so each query retrieves relevant studies.
+Decompose the research topic below into at most five focused, non-overlapping \
+search queries suitable for PubMed and general web search. Span distinct clinical \
+axes such as mechanism of action, efficacy and clinical outcomes, and adverse \
+effects and safety. Use precise medical terminology (including MeSH-style terms \
+where appropriate) so each query retrieves relevant studies. Return no more than \
+five queries — prefer fewer, high-signal queries over many overlapping ones.
 
 Research topic: {topic}"""
 
 
-def make_planner_node(llm: LLMPort) -> Callable[[AgentState], dict]:
+def make_planner_node(
+    llm: LLMPort,
+    *,
+    max_queries: int = _DEFAULT_MAX_QUERIES,
+) -> Callable[[AgentState], dict]:
     """Build the ``planner`` node bound to the given :class:`LLMPort`.
 
     The returned callable reads ``state["topic"]``, asks the LLM for a structured
@@ -64,13 +78,20 @@ def make_planner_node(llm: LLMPort) -> Callable[[AgentState], dict]:
     degenerate plan with no usable queries, the node falls back to a single query
     equal to the topic itself, so ``fetch_evidence`` downstream always has at
     least one query to run rather than stalling on an empty list.
+
+    The number of queries is capped at ``max_queries`` by truncating the plan in
+    code (``plan.queries[:max_queries]``). The prompt also asks for "at most five"
+    queries, but the truncation is the real guarantee: it bounds a run's cost even
+    when the model ignores the instruction and returns dozens of queries (each
+    query fans out across every retrieval source, so the query count is the
+    dominant multiplier on how many papers a run fetches and evaluates).
     """
 
     def planner(state: AgentState) -> dict:
         topic = state["topic"]
         prompt = _PLANNER_PROMPT.format(topic=topic)
         plan = llm.generate_structured(prompt, QueryPlan)
-        queries = plan.queries or [topic]
+        queries = (plan.queries or [topic])[:max_queries]
         return {"queries": queries}
 
     return planner
@@ -342,12 +363,12 @@ def make_evaluator_node(
 _REFINE_PROMPT = """You are a clinical research librarian refining a literature search \
 that did not yet surface enough strong evidence.
 
-The queries already tried did not return sufficient high-quality studies. Propose a \
-new set of search queries that target gaps the previous attempt missed. Explore \
-different clinical angles (e.g. mechanism, specific populations or subgroups, \
-comparators, long-term or adverse outcomes) and alternative terminology or MeSH-style \
-synonyms. Do NOT repeat any of the previously tried queries, and avoid merely \
-rephrasing them.
+The queries already tried did not return sufficient high-quality studies. Propose \
+at most five new search queries that target gaps the previous attempt missed. \
+Explore different clinical angles (e.g. mechanism, specific populations or \
+subgroups, comparators, long-term or adverse outcomes) and alternative terminology \
+or MeSH-style synonyms. Do NOT repeat any of the previously tried queries, and \
+avoid merely rephrasing them. Return no more than five queries.
 
 Research topic: {topic}
 
@@ -357,7 +378,11 @@ Previously tried queries:
 Evidence found so far: {found_summary}"""
 
 
-def make_refine_queries_node(llm: LLMPort) -> Callable[[AgentState], dict]:
+def make_refine_queries_node(
+    llm: LLMPort,
+    *,
+    max_queries: int = _DEFAULT_MAX_QUERIES,
+) -> Callable[[AgentState], dict]:
     """Build the ``refine_queries`` node bound to the given :class:`LLMPort`.
 
     Reached on the self-correction loop's "refine" branch, i.e. when the evaluator
@@ -368,6 +393,11 @@ def make_refine_queries_node(llm: LLMPort) -> Callable[[AgentState], dict]:
     :class:`QueryPlan` aimed at the gaps the previous queries missed. It returns
     ``{"queries": plan.queries}``, which overwrites the old queries so the next
     ``fetch_evidence`` pass searches new ground.
+
+    As in the planner, the refined query list is capped at ``max_queries`` by
+    truncating in code so each loop pass stays as cheap as the first; the fallback
+    list (previous queries or the topic) is truncated the same way. The prompt also
+    asks for "at most five" queries, but the truncation is the guarantee.
 
     Fallback: if the model returns a degenerate plan with no usable queries, the
     node falls back to the previously tried queries (or the topic itself when none
@@ -396,7 +426,7 @@ def make_refine_queries_node(llm: LLMPort) -> Callable[[AgentState], dict]:
             found_summary=found_summary,
         )
         plan = llm.generate_structured(prompt, QueryPlan)
-        queries = plan.queries or previous_queries or [topic]
+        queries = (plan.queries or previous_queries or [topic])[:max_queries]
         return {"queries": queries}
 
     return refine_queries

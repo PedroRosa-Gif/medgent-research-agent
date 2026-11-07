@@ -45,10 +45,14 @@ _SYNTHESIZER_NODE = "synthesizer"
 class EventKind(StrEnum):
     """The kind of a normalized :class:`ResearchEvent`.
 
-    ``STEP`` marks one node-update event (the partial state a node returned);
-    ``TOKEN`` marks a chunk of the synthesizer's report streamed as it is written.
+    ``NODE_START`` marks a node *beginning* to run (before it produces any
+    output), so a UI can show an in-progress "thinking" indicator for the active
+    step; ``STEP`` marks one node-update event (the partial state a node returned
+    when it *finished*); ``TOKEN`` marks a chunk of the synthesizer's report
+    streamed as it is written.
     """
 
+    NODE_START = "node_start"
     STEP = "step"
     TOKEN = "token"
 
@@ -56,11 +60,11 @@ class EventKind(StrEnum):
 class ResearchEvent(NamedTuple):
     """One normalized event emitted by :meth:`ResearchTopicUseCase.stream_events`.
 
-    - ``kind`` is :class:`EventKind` (``STEP`` or ``TOKEN``).
+    - ``kind`` is :class:`EventKind` (``NODE_START``, ``STEP`` or ``TOKEN``).
     - ``node`` is the graph node the event came from (always ``"synthesizer"`` for
       token events).
-    - ``payload`` is the partial state dict for a step event, or the text chunk
-      (a ``str``) for a token event.
+    - ``payload`` is the partial state dict for a step event, the text chunk
+      (a ``str``) for a token event, or an empty dict for a node-start event.
     """
 
     kind: EventKind
@@ -78,9 +82,10 @@ class ResearchTopicUseCase:
 
     The tuning parameters mirror :func:`build_graph`'s defaults so the use case is
     a thin, faithful wrapper: ``max_iterations`` seeds the loop ceiling in the
-    state, while ``max_results_per_source``, ``min_studies``, ``quality_threshold``,
-    ``heuristic_weight``, ``max_studies_per_iteration``, and ``batch_size`` are
-    forwarded to the graph nodes.
+    state, while ``max_queries``, ``max_results_per_source``, ``min_studies``,
+    ``quality_threshold``, ``heuristic_weight``, ``max_studies_per_iteration``, and
+    ``batch_size`` are forwarded to the graph nodes. ``max_queries`` caps how many
+    search queries the planner/refine steps emit, bounding a run's cost.
     """
 
     def __init__(
@@ -89,6 +94,7 @@ class ResearchTopicUseCase:
         sources: Sequence[EvidenceRetrievalPort],
         *,
         max_iterations: int = 3,
+        max_queries: int = 5,
         max_results_per_source: int = 8,
         min_studies: int = 3,
         quality_threshold: float = 0.6,
@@ -100,6 +106,7 @@ class ResearchTopicUseCase:
         self._compiled = build_graph(
             llm,
             sources,
+            max_queries=max_queries,
             max_results_per_source=max_results_per_source,
             min_studies=min_studies,
             quality_threshold=quality_threshold,
@@ -161,8 +168,14 @@ class ResearchTopicUseCase:
         """Execute the loop for ``topic``, yielding normalized streaming events.
 
         Runs the compiled graph with LangGraph's combined
-        ``stream_mode=["updates", "messages"]`` so a single pass produces both:
+        ``stream_mode=["updates", "messages", "debug"]`` so a single pass produces:
 
+        - **node-start events** — one per node *beginning* to run (``"debug"``
+          mode, the ``type == "task"`` entries), yielded as
+          ``ResearchEvent(EventKind.NODE_START, node, {})`` *before* that node's
+          step event. ``"updates"`` only fires *after* a node finishes, so the
+          debug stream's task entries are what let the UI show the active step as
+          "thinking" while it runs;
         - **step events** — one per node completion (``"updates"`` mode), carrying
           the partial state the node returned, yielded as
           ``ResearchEvent(EventKind.STEP, node, update_dict)``; and
@@ -175,7 +188,10 @@ class ResearchTopicUseCase:
         is uninteresting as a token stream and is already surfaced by their step
         events. Filtering uses the ``langgraph_node`` key LangGraph puts in each
         message chunk's metadata; chunks from any other node (or carrying no text)
-        are dropped. ``thread_id`` and ``max_iterations`` behave as in :meth:`run`.
+        are dropped. The debug stream also carries ``checkpoint`` and
+        ``task_result`` entries, which are ignored — only ``type == "task"`` (a
+        node start) is translated. ``thread_id`` and ``max_iterations`` behave as
+        in :meth:`run`.
 
         This keeps the use case framework-light: it depends on langgraph's stream
         contract (already an application-layer dependency via :func:`build_graph`)
@@ -184,7 +200,7 @@ class ResearchTopicUseCase:
         state = initial_state(topic, max_iterations=self._resolve_iterations(max_iterations))
         config = {"configurable": {"thread_id": thread_id or uuid.uuid4().hex}}
         for mode, chunk in self._compiled.stream(
-            state, config=config, stream_mode=["updates", "messages"]
+            state, config=config, stream_mode=["updates", "messages", "debug"]
         ):
             if mode == "updates":
                 # One single-entry dict per node completion: {node: partial_update}.
@@ -198,10 +214,36 @@ class ResearchTopicUseCase:
                 text = _message_text(message)
                 if text:
                     yield ResearchEvent(EventKind.TOKEN, _SYNTHESIZER_NODE, text)
+            elif mode == "debug":
+                # Debug carries checkpoint/task/task_result entries; a ``task`` entry
+                # fires when a node *starts*, before its ``updates`` step. Translate
+                # only those into a node-start event with the node's name.
+                node = _debug_task_node(chunk)
+                if node is not None:
+                    yield ResearchEvent(EventKind.NODE_START, node, {})
 
     def _resolve_iterations(self, override: int | None) -> int:
         """Return the per-run iteration ceiling, honoring an optional override."""
         return override if override is not None else self._max_iterations
+
+
+def _debug_task_node(chunk: object) -> str | None:
+    """Return the node name of a ``"debug"`` stream chunk that is a task start.
+
+    LangGraph's ``stream_mode="debug"`` emits dicts tagged by ``type``:
+    ``"checkpoint"``, ``"task"`` (a node *starting*), and ``"task_result"`` (a node
+    finishing). Only a ``"task"`` entry marks a node start; its ``payload.name`` is
+    the node about to run. Returns that name, or ``None`` for any other debug entry
+    (or a shape we do not recognize) so the caller can simply skip it.
+    """
+    if not isinstance(chunk, dict) or chunk.get("type") != "task":
+        return None
+    payload = chunk.get("payload")
+    if isinstance(payload, dict):
+        name = payload.get("name")
+        if isinstance(name, str):
+            return name
+    return None
 
 
 def _message_text(message: object) -> str:

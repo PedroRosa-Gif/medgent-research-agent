@@ -181,6 +181,17 @@ def test_stream_emits_step_and_done(client: TestClient) -> None:
     assert any(step["node"] == "planner" for step in steps)
     assert any(step["node"] == "synthesizer" for step in steps)
 
+    # A node_start event precedes each node's work; the planner start must come
+    # before the planner step so a UI can show the step as "thinking" while it
+    # runs.
+    starts = [data for name, data in events if name == "node_start"]
+    assert any(start["node"] == "planner" for start in starts)
+    planner_start = next(i for i, (name, data) in enumerate(events) if name == "node_start")
+    planner_step = next(
+        i for i, (name, data) in enumerate(events) if name == "step" and data["node"] == "planner"
+    )
+    assert planner_start < planner_step
+
     # Any token events (none on the fake path) must be tagged node=synthesizer.
     tokens = [data for name, data in events if name == "token"]
     assert all(token["node"] == "synthesizer" for token in tokens)

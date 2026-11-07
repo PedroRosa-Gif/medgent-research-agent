@@ -76,6 +76,7 @@ def build_graph(
     llm: LLMPort,
     sources: Sequence[EvidenceRetrievalPort],
     *,
+    max_queries: int = 5,
     max_results_per_source: int = 8,
     min_studies: int = 3,
     quality_threshold: float = 0.6,
@@ -88,9 +89,12 @@ def build_graph(
 
     The ports (``llm`` and the retrieval ``sources``) are injected into the node
     factories here; this function never touches a concrete adapter. The tuning
-    parameters (``max_results_per_source``, ``min_studies``, ``quality_threshold``,
-    ``heuristic_weight``, ``max_studies_per_iteration``, ``batch_size``) are
-    forwarded to the ``fetch_evidence`` and ``evaluator`` factories.
+    parameters (``max_queries``, ``max_results_per_source``, ``min_studies``,
+    ``quality_threshold``, ``heuristic_weight``, ``max_studies_per_iteration``,
+    ``batch_size``) are forwarded to the ``planner``, ``fetch_evidence``,
+    ``evaluator``, and ``refine_queries`` factories. ``max_queries`` caps how many
+    search queries the planner and refine steps emit — the dominant multiplier on a
+    run's cost, since each query fans out across every source.
 
     Topology — ``START -> planner -> fetch_evidence -> evaluator``, then a
     conditional edge on :func:`route_after_evaluator`: ``"finish"`` goes to
@@ -111,7 +115,7 @@ def build_graph(
 
     graph: StateGraph = StateGraph(AgentState)
 
-    graph.add_node("planner", make_planner_node(llm))
+    graph.add_node("planner", make_planner_node(llm, max_queries=max_queries))
     graph.add_node(
         "fetch_evidence",
         make_fetch_evidence_node(sources, max_results_per_source=max_results_per_source),
@@ -127,7 +131,7 @@ def build_graph(
             batch_size=batch_size,
         ),
     )
-    graph.add_node("refine_queries", make_refine_queries_node(llm))
+    graph.add_node("refine_queries", make_refine_queries_node(llm, max_queries=max_queries))
     graph.add_node("synthesizer", make_synthesizer_node(llm))
 
     graph.add_edge(START, "planner")
