@@ -18,6 +18,7 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import type {
   DoneEvent,
   ErrorEvent,
+  NodeStartEvent,
   ResearchEvent,
   StepEvent,
   TokenEvent,
@@ -73,6 +74,10 @@ export function useResearchStream(): UseResearchStream {
       const source = new EventSource(`/research/stream?${params.toString()}`);
       sourceRef.current = source;
 
+      source.addEventListener('node_start', (e) => {
+        const payload = parseData<NodeStartEvent>((e as MessageEvent).data);
+        if (payload) dispatchEvent({ kind: 'node_start', payload });
+      });
       source.addEventListener('step', (e) => {
         const payload = parseData<StepEvent>((e as MessageEvent).data);
         if (payload) dispatchEvent({ kind: 'step', payload });

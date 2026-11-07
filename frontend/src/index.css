@@ -94,6 +94,33 @@
     animation: teal-pulse 1.6s ease-in-out infinite;
   }
 
+  /* Shimmer on the "thinking" label — a teal highlight sweeping across the
+     text while a node runs, so the active step reads as live work. */
+  @keyframes text-shimmer {
+    0% {
+      background-position: 180% center;
+    }
+    100% {
+      background-position: -80% center;
+    }
+  }
+  .shimmer-text {
+    background: linear-gradient(
+      90deg,
+      var(--color-fog-text) 0%,
+      var(--color-fog-text) 35%,
+      var(--color-teal-soft) 50%,
+      var(--color-fog-text) 65%,
+      var(--color-fog-text) 100%
+    );
+    background-size: 220% auto;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: text-shimmer 2.4s linear infinite;
+  }
+
   /* Blinking caret shown while the report types out. */
   @keyframes caret-blink {
     0%,
@@ -111,8 +138,14 @@
 
   @media (prefers-reduced-motion: reduce) {
     .pulse-teal,
-    .caret-blink {
+    .caret-blink,
+    .shimmer-text {
       animation: none;
+    }
+    /* Keep the thinking label legible when the shimmer is disabled. */
+    .shimmer-text {
+      color: var(--color-fog-text);
+      -webkit-text-fill-color: var(--color-fog-text);
     }
   }
 }

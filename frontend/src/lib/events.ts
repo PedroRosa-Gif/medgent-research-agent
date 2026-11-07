@@ -2,10 +2,10 @@
  * SSE event payload types — a 1:1 mirror of the backend contract in
  * `backend/src/medgent/adapters/driving/api/app.py`.
  *
- * The server frames four named SSE events. `EventSource` dispatches them by
- * name (`step`/`token`/`done`/`error`) via `addEventListener`, and the hook in
- * `useResearchStream.ts` parses each event's JSON `data` into one of these
- * shapes before handing it to the pure reducer.
+ * The server frames five named SSE events. `EventSource` dispatches them by
+ * name (`node_start`/`step`/`token`/`done`/`error`) via `addEventListener`, and
+ * the hook in `useResearchStream.ts` parses each event's JSON `data` into one of
+ * these shapes before handing it to the pure reducer.
  *
  * Nothing in here touches the DOM or the network — these are plain data types,
  * so both the hook and the reducer tests can import them freely.
@@ -24,6 +24,16 @@ export interface StudySummary {
   identifier: string;
   study_type: string;
   quality_score: number;
+}
+
+/**
+ * `data` of a `node_start` event — a node has *begun* running, before it has
+ * produced any output. The backend derives these from LangGraph's task-start
+ * signal, so one arrives just before each node's `step` event; the UI uses them
+ * to show the active step as "thinking".
+ */
+export interface NodeStartEvent {
+  node: NodeName;
 }
 
 /**
@@ -75,6 +85,7 @@ export interface ErrorEvent {
  * the single contract between the (impure) hook and the (pure) reducer.
  */
 export type ResearchEvent =
+  | { kind: 'node_start'; payload: NodeStartEvent }
   | { kind: 'step'; payload: StepEvent }
   | { kind: 'token'; payload: TokenEvent }
   | { kind: 'done'; payload: DoneEvent }

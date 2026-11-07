@@ -7,7 +7,7 @@
  * `useResearchStream`, which owns the EventSource and feeds the pure reducer.
  */
 
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { TopicInput } from './components/TopicInput';
 import { StatusBar } from './components/StatusBar';
 import { ReasoningTimeline } from './components/ReasoningTimeline';
@@ -40,6 +40,18 @@ function Section({
 export function App() {
   const { state, start, reset } = useResearchStream();
 
+  // "Follow latest": an anchor at the bottom of the live content that we scroll
+  // into view as new timeline steps appear and as report tokens stream in. We
+  // key the effect on the number of steps and the report length (both grow
+  // monotonically during a run), so each new step/token nudges the view down.
+  const followRef = useRef<HTMLDivElement | null>(null);
+  const stepCount = state.steps.length;
+  const reportLength = state.reportText.length;
+  useEffect(() => {
+    if (state.status !== 'running') return;
+    followRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [state.status, stepCount, reportLength]);
+
   function handleSubmit(topic: string) {
     // A fresh run after done/error clears the previous timeline + report.
     if (state.status === 'done' || state.status === 'error') reset();
@@ -48,7 +60,7 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-onyx">
-      <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-5 py-12 sm:px-6 sm:py-16">
+      <main className="mx-auto flex w-full max-w-[780px] flex-col gap-8 px-5 py-12 sm:px-6 sm:py-16">
         {/* Header */}
         <header className="flex flex-col gap-2">
           <div className="flex items-center gap-2.5">
@@ -92,6 +104,10 @@ export function App() {
 
         {/* Persistent disclaimer */}
         <Disclaimer />
+
+        {/* Scroll anchor: the "follow latest" effect keeps this in view so the
+            newest reasoning step / streaming report stays on screen. */}
+        <div ref={followRef} aria-hidden="true" />
       </main>
     </div>
   );

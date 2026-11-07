@@ -14,48 +14,45 @@ interface ReasoningTimelineProps {
   state: ReasoningState;
 }
 
+/** The queries list for planner / refine, rendered as a tight mono list. */
+function QueryList({ queries }: { queries: string[] }) {
+  if (!queries.length) return null;
+  return (
+    <ul className="mt-2 flex flex-col gap-1">
+      {queries.map((q, i) => (
+        <li key={i} className="flex gap-2 text-[13px] text-mist-text">
+          <span className="text-steel-text">·</span>
+          <span className="font-mono text-[12.5px] text-mist-text">{q}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Rich narration shown once a step is `done` (never raw JSON). */
 function StepDetail({ entry }: { entry: StepEntry }) {
-  switch (entry.node) {
-    case 'planner':
-    case 'refine_queries':
-      if (!entry.queries?.length) return null;
-      return (
-        <ul className="mt-2 flex flex-col gap-1">
-          {entry.queries.map((q, i) => (
-            <li
-              key={i}
-              className="flex gap-2 text-[13px] text-mist-text"
-            >
-              <span className="text-steel-text">·</span>
-              <span className="font-mono text-[12.5px] text-mist-text">{q}</span>
-            </li>
-          ))}
-        </ul>
-      );
-    case 'fetch_evidence':
-      return (
-        <p className="mt-1.5 text-[13px] text-fog-text">
-          {entry.paperCount ?? 0} paper{entry.paperCount === 1 ? '' : 's'} retrieved
+  return (
+    <>
+      {entry.narration && (
+        <p className="mt-0.5 text-[13px] leading-relaxed text-mist-text">
+          {entry.narration}
         </p>
-      );
-    case 'evaluator':
-      return (
+      )}
+      {(entry.node === 'planner' || entry.node === 'refine_queries') && (
+        <QueryList queries={entry.queries ?? []} />
+      )}
+      {entry.node === 'evaluator' && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <Chip label={`iteration ${entry.iteration ?? '?'}`} />
-          <Chip label={`${entry.studyCount ?? 0} studies`} />
+          <Chip label={`${entry.passingCount ?? 0}/${entry.studyCount ?? 0} passed`} />
           <Chip
             label={entry.isSufficient ? 'sufficient' : 'needs more evidence'}
             tone={entry.isSufficient ? 'ok' : 'warn'}
           />
         </div>
-      );
-    case 'synthesizer':
-      return (
-        <p className="mt-1.5 text-[13px] text-fog-text">
-          Writing the synthesized report…
-        </p>
-      );
-  }
+      )}
+    </>
+  );
 }
 
 function Chip({ label, tone }: { label: string; tone?: 'ok' | 'warn' }) {
@@ -94,9 +91,12 @@ export function ReasoningTimeline({ state }: ReasoningTimelineProps) {
         aria-hidden="true"
       />
       <AnimatePresence initial={false}>
-        {steps.map((entry, index) => {
+        {steps.map((entry) => {
           const meta = NODE_META[entry.node];
-          const isActive = status === 'running' && index === steps.length - 1 && activeNode === entry.node;
+          // A `thinking` entry is the live step: pulse it in teal. Once a run
+          // ends (done/error) nothing is thinking, so no stale pulse remains.
+          const isThinking = entry.status === 'thinking' && status === 'running';
+          const isActive = isThinking && activeNode === entry.node;
           return (
             <motion.li
               key={entry.id}
@@ -126,8 +126,17 @@ export function ReasoningTimeline({ state }: ReasoningTimelineProps) {
                     {meta.label}
                   </span>
                 </div>
-                <p className="mt-0.5 text-[13px] text-fog-text">{entry.summary}</p>
-                <StepDetail entry={entry} />
+                {isThinking ? (
+                  <p className="mt-0.5 flex items-center gap-2 text-[13px] text-teal-soft">
+                    <span
+                      className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-teal pulse-teal"
+                      aria-hidden="true"
+                    />
+                    <span className="shimmer-text">{entry.thinkingLabel}</span>
+                  </p>
+                ) : (
+                  <StepDetail entry={entry} />
+                )}
               </div>
             </motion.li>
           );

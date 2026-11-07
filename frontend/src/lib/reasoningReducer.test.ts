@@ -19,8 +19,14 @@ import type {
 import {
   initialState,
   reasoningReducer,
+  THINKING_LABELS,
   type ReasoningState,
 } from './reasoningReducer';
+
+/** Build a `node_start` event action for `node`. */
+function nodeStart(node: NodeName): ResearchEvent {
+  return { kind: 'node_start', payload: { node } };
+}
 
 /** Build a `step` event action for `node` with the given update `data`. */
 function step(node: NodeName, summary: string, data: StepData): ResearchEvent {
@@ -67,26 +73,74 @@ describe('reasoningReducer', () => {
     expect(state.reportText).toBe('');
   });
 
+  it('node_start pushes a thinking entry with the node thinking label', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    state = run(state, [nodeStart('planner')]);
+
+    expect(state.steps).toHaveLength(1);
+    const entry = state.steps[0];
+    expect(entry.node).toBe('planner');
+    expect(entry.status).toBe('thinking');
+    expect(entry.thinkingLabel).toBe(THINKING_LABELS.planner);
+    expect(entry.narration).toBeUndefined();
+    expect(state.activeNode).toBe('planner');
+  });
+
+  it('a step flips the matching thinking entry to done with narration', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    state = run(state, [
+      nodeStart('planner'),
+      step('planner', 'Planned 3 queries', { queries: ['a', 'b', 'c'] }),
+    ]);
+
+    // Still one entry — the step did not append a second; it flipped the first.
+    expect(state.steps).toHaveLength(1);
+    const entry = state.steps[0];
+    expect(entry.status).toBe('done');
+    expect(entry.queries).toEqual(['a', 'b', 'c']);
+    expect(entry.narration).toBe('Broke the topic into 3 lines of inquiry:');
+  });
+
+  it('a step with no preceding node_start still produces a done entry', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    state = run(state, [
+      step('fetch_evidence', 'Fetched 2 papers', { evidence: [1, 2] }),
+    ]);
+
+    expect(state.steps).toHaveLength(1);
+    expect(state.steps[0].status).toBe('done');
+    expect(state.steps[0].paperCount).toBe(2);
+    expect(state.steps[0].narration).toBe('Found 2 studies across PubMed and the web.');
+  });
+
   it('walks a full self-correction run and ends done', () => {
     let state = reasoningReducer(initialState(), {
       type: 'start',
       topic: 'metformin efficacy',
     });
 
+    // Each node starts (thinking) then finishes (step flips it to done), as the
+    // real SSE stream delivers: node_start precedes each matching step.
     const sequence: ResearchEvent[] = [
+      nodeStart('planner'),
       step('planner', 'Planned 2 queries', { queries: ['q1', 'q2'] }),
+      nodeStart('fetch_evidence'),
       step('fetch_evidence', 'Fetched 5 papers', { evidence: [1, 2, 3, 4, 5] }),
+      nodeStart('evaluator'),
       step('evaluator', 'Evaluated 3 studies (iteration 1, sufficient=False)', {
         evaluated_studies: STUDIES.slice(0, 1),
         is_sufficient: false,
         iteration: 1,
       }),
+      nodeStart('refine_queries'),
       step('refine_queries', 'Refined into 2 new queries', {
         queries: ['q3', 'q4'],
       }),
+      nodeStart('fetch_evidence'),
       step('fetch_evidence', 'Fetched 8 papers', {
         evidence: [1, 2, 3, 4, 5, 6, 7, 8],
       }),
+      nodeStart('evaluator'),
       step('evaluator', 'Evaluated 2 studies (iteration 2, sufficient=True)', {
         evaluated_studies: STUDIES,
         is_sufficient: true,
@@ -95,7 +149,7 @@ describe('reasoningReducer', () => {
     ];
     state = run(state, sequence);
 
-    // Step entries accumulate in arrival order.
+    // Step entries accumulate in arrival order — one per node_start, not doubled.
     expect(state.steps.map((s) => s.node)).toEqual([
       'planner',
       'fetch_evidence',
@@ -104,20 +158,33 @@ describe('reasoningReducer', () => {
       'fetch_evidence',
       'evaluator',
     ]);
-    // Per-node detail extraction.
+    // All entries are done (each step flipped its thinking entry).
+    expect(state.steps.every((s) => s.status === 'done')).toBe(true);
+    // Per-node detail extraction + rich narration (no raw JSON).
     expect(state.steps[0].queries).toEqual(['q1', 'q2']);
+    expect(state.steps[0].narration).toBe('Broke the topic into 2 lines of inquiry:');
     expect(state.steps[1].paperCount).toBe(5);
+    expect(state.steps[1].narration).toBe('Found 5 studies across PubMed and the web.');
     expect(state.steps[2].isSufficient).toBe(false);
     expect(state.steps[2].iteration).toBe(1);
+    expect(state.steps[2].passingCount).toBe(1); // STUDIES[0] has quality 0.9 >= 0.6
+    expect(state.steps[2].narration).toBe(
+      'Appraised 1 study — 1 passed the quality bar (iteration 1). Evidence insufficient, continuing.',
+    );
     expect(state.steps[3].queries).toEqual(['q3', 'q4']);
+    expect(state.steps[3].narration).toBe('Refined into 2 new queries:');
     expect(state.steps[4].paperCount).toBe(8);
     expect(state.steps[5].isSufficient).toBe(true);
+    expect(state.steps[5].passingCount).toBe(2);
+    expect(state.steps[5].narration).toBe(
+      'Appraised 2 studies — 2 passed the quality bar (iteration 2). Evidence sufficient.',
+    );
     // Loop visibility: iteration tracks the latest evaluator.
     expect(state.iterations).toBe(2);
     // Active node is the most recent step; still running.
     expect(state.activeNode).toBe('evaluator');
     expect(state.status).toBe('running');
-    // Monotonic ids, unique and ordered.
+    // Monotonic ids, unique and ordered (one id per node_start).
     expect(state.steps.map((s) => s.id)).toEqual([0, 1, 2, 3, 4, 5]);
 
     // Report types out: tokens concatenate in order.

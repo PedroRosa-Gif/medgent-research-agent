@@ -27,18 +27,43 @@ import type {
 /** Lifecycle status of a single research run. */
 export type RunStatus = 'idle' | 'running' | 'done' | 'error';
 
+/** Status of one timeline entry: a node is `thinking` until its step arrives. */
+export type StepStatus = 'thinking' | 'done';
+
 /**
- * One rendered entry on the reasoning timeline. Built from a `step` event; the
- * `detail` fields are pre-extracted from the node update so the view stays dumb.
+ * The agent-style "thinking" line shown while a node is running, before it has
+ * produced output. One per node; the self-correction loop reuses the same label
+ * each time a node runs again.
+ */
+export const THINKING_LABELS: Record<NodeName, string> = {
+  planner: 'Planning the search strategy…',
+  fetch_evidence: 'Searching PubMed and the web…',
+  evaluator: 'Appraising study quality…',
+  refine_queries: 'Refining the queries…',
+  synthesizer: 'Writing the report…',
+};
+
+/**
+ * One rendered entry on the reasoning timeline. A `node_start` event pushes an
+ * entry in the `thinking` status (just a node + its thinking label); the
+ * matching `step` event flips it to `done` and fills the narration fields below,
+ * pre-extracted from the node update so the view stays dumb.
  */
 export interface StepEntry {
   /** Monotonic id for stable React keys (reducer-assigned, never from the server). */
   id: number;
   node: NodeName;
-  summary: string;
+  /** `thinking` while the node runs; `done` once its step arrives. */
+  status: StepStatus;
+  /** The "thinking" line shown while `status === 'thinking'`. */
+  thinkingLabel: string;
+  /** Human narration of the finished step (filled on `done`). */
+  narration?: string;
+  summary?: string;
   queries?: string[];
   paperCount?: number;
   studyCount?: number;
+  passingCount?: number;
   iteration?: number;
   isSufficient?: boolean;
 }
@@ -92,31 +117,74 @@ function runningState(topic: string, nextStepId: number): ReasoningState {
   };
 }
 
-/** Pull the renderable detail fields out of a node update. */
-function entryFromStep(
-  id: number,
-  node: NodeName,
-  summary: string,
-  data: StepData,
-): StepEntry {
-  const entry: StepEntry = { id, node, summary };
-  switch (node) {
-    case 'planner':
-    case 'refine_queries':
-      entry.queries = data.queries ?? [];
+/** Pluralize a count: `n thing(s)`. */
+function plural(count: number, singular: string, pluralForm?: string): string {
+  return `${count} ${count === 1 ? singular : (pluralForm ?? `${singular}s`)}`;
+}
+
+/** Count how many evaluated studies cleared the quality bar. */
+function countPassing(studies: StudySummary[], threshold = 0.6): number {
+  return studies.filter((s) => s.quality_score >= threshold).length;
+}
+
+/**
+ * A fresh `thinking` entry for a node that just started. The narration fields
+ * are left unset until the matching `step` flips it to `done`.
+ */
+function startEntry(id: number, node: NodeName): StepEntry {
+  return {
+    id,
+    node,
+    status: 'thinking',
+    thinkingLabel: THINKING_LABELS[node],
+  };
+}
+
+/**
+ * Flip a `thinking` entry to `done`, extracting the renderable detail fields and
+ * composing the rich, human narration for that node (never raw JSON).
+ */
+function finishEntry(entry: StepEntry, summary: string, data: StepData): StepEntry {
+  const next: StepEntry = { ...entry, status: 'done', summary };
+  switch (entry.node) {
+    case 'planner': {
+      const queries = data.queries ?? [];
+      next.queries = queries;
+      next.narration = `Broke the topic into ${plural(queries.length, 'line')} of inquiry:`;
       break;
-    case 'fetch_evidence':
-      entry.paperCount = data.evidence?.length ?? 0;
+    }
+    case 'refine_queries': {
+      const queries = data.queries ?? [];
+      next.queries = queries;
+      next.narration = `Refined into ${plural(queries.length, 'new query', 'new queries')}:`;
       break;
-    case 'evaluator':
-      entry.studyCount = data.evaluated_studies?.length ?? 0;
-      entry.iteration = data.iteration;
-      entry.isSufficient = data.is_sufficient;
+    }
+    case 'fetch_evidence': {
+      const count = data.evidence?.length ?? 0;
+      next.paperCount = count;
+      next.narration = `Found ${plural(count, 'study', 'studies')} across PubMed and the web.`;
       break;
+    }
+    case 'evaluator': {
+      const studies = data.evaluated_studies ?? [];
+      const passing = countPassing(studies);
+      next.studyCount = studies.length;
+      next.passingCount = passing;
+      next.iteration = data.iteration;
+      next.isSufficient = data.is_sufficient;
+      const verdict = data.is_sufficient
+        ? 'Evidence sufficient.'
+        : 'Evidence insufficient, continuing.';
+      next.narration =
+        `Appraised ${plural(studies.length, 'study', 'studies')} — ` +
+        `${passing} passed the quality bar (iteration ${data.iteration ?? '?'}). ${verdict}`;
+      break;
+    }
     case 'synthesizer':
+      next.narration = 'Report ready.';
       break;
   }
-  return entry;
+  return next;
 }
 
 function onDone(state: ReasoningState, payload: DoneEvent): ReasoningState {
@@ -141,23 +209,59 @@ function onError(state: ReasoningState, payload: ErrorEvent): ReasoningState {
   };
 }
 
+/**
+ * Index of the latest `thinking` entry for `node`, or `-1` if none. A step
+ * flips the most recent still-thinking entry for its node, which keeps the
+ * self-correction loop correct (each loop pass starts a new entry, so the step
+ * resolves the one that node just started rather than an earlier one).
+ */
+function latestThinkingIndex(steps: StepEntry[], node: NodeName): number {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    if (steps[i].node === node && steps[i].status === 'thinking') return i;
+  }
+  return -1;
+}
+
+/** A node began running: push a `thinking` entry and mark it the active node. */
+function onNodeStart(state: ReasoningState, node: NodeName): ReasoningState {
+  return {
+    ...state,
+    steps: [...state.steps, startEntry(state.nextStepId, node)],
+    activeNode: node,
+    nextStepId: state.nextStepId + 1,
+  };
+}
+
 /** Apply one parsed SSE event to the state. */
 function onEvent(state: ReasoningState, event: ResearchEvent): ReasoningState {
   switch (event.kind) {
+    case 'node_start':
+      return onNodeStart(state, event.payload.node);
     case 'step': {
       const { node, summary, data } = event.payload;
-      const entry = entryFromStep(state.nextStepId, node, summary, data);
       const iterations =
         node === 'evaluator' && typeof data.iteration === 'number'
           ? data.iteration
           : state.iterations;
-      return {
-        ...state,
-        steps: [...state.steps, entry],
-        activeNode: node,
-        iterations,
-        nextStepId: state.nextStepId + 1,
-      };
+
+      // Flip the matching `thinking` entry to `done`. If no node_start preceded
+      // this step (defensive — the backend always emits one), append a finished
+      // entry so no step is ever dropped.
+      const index = latestThinkingIndex(state.steps, node);
+      let steps: StepEntry[];
+      let nextStepId = state.nextStepId;
+      if (index === -1) {
+        steps = [...state.steps, finishEntry(startEntry(nextStepId, node), summary, data)];
+        nextStepId += 1;
+      } else {
+        steps = state.steps.map((entry, i) =>
+          i === index ? finishEntry(entry, summary, data) : entry,
+        );
+      }
+
+      // The active node stays the just-finished node until the next node starts,
+      // so the UI keeps a sensible highlight between steps.
+      return { ...state, steps, activeNode: node, iterations, nextStepId };
     }
     case 'token':
       // Append in arrival order so the report "types out" exactly as streamed.
