@@ -1,114 +1,192 @@
 /**
- * MedGent — single-page reasoning UI.
+ * MedGent: single-page reasoning UI.
  *
- * Composes the one screen: title + tagline, topic input, the reasoning
- * timeline (centerpiece), the live-typing report, the evaluated-studies panel,
- * an error card, and a persistent disclaimer. All run state comes from
- * `useResearchStream`, which owns the EventSource and feeds the pure reducer.
+ * Two layouts of the same page:
+ *   - idle:   a centered hero with the composer and example chips,
+ *   - active: a sticky glass header, the composer showing the topic, then the
+ *             transcript (reasoning → report → actions → sources) in a ~780px
+ *             column.
+ *
+ * All run state comes from `useResearchStream` (EventSource + pure reducer).
+ * This component only wires hooks to presentational components.
  */
 
-import { useEffect, useRef, type ReactNode } from 'react';
-import { TopicInput } from './components/TopicInput';
-import { StatusBar } from './components/StatusBar';
-import { ReasoningTimeline } from './components/ReasoningTimeline';
-import { ReportView } from './components/ReportView';
-import { StudiesPanel } from './components/StudiesPanel';
-import { ErrorCard } from './components/ErrorCard';
+import { AnimatePresence, MotionConfig, useReducedMotion } from 'motion/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActionBar } from './components/ActionBar';
+import { AmbientBackground } from './components/AmbientBackground';
+import { Composer } from './components/Composer';
 import { Disclaimer } from './components/Disclaimer';
+import { ErrorCard } from './components/ErrorCard';
+import { Header } from './components/Header';
+import { Hero } from './components/Hero';
+import { ReasoningSection } from './components/ReasoningTimeline';
+import { ReportView } from './components/ReportView';
+import { SourcesPanel } from './components/SourcesPanel';
+import { StoppedNotice } from './components/StoppedNotice';
+import { downloadTextFile } from './lib/download';
+import { buildMarkdownFilename } from './lib/format';
+import { useClipboard } from './lib/useClipboard';
+import { useFollowLatest } from './lib/useFollowLatest';
+import { useNow } from './lib/useNow';
 import { useResearchStream } from './lib/useResearchStream';
-
-/** A quiet section shell: label + hairline-bordered body. */
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="flex flex-col gap-3">
-      <h2 className="font-w510 text-[13px] uppercase tracking-wide text-steel-text">
-        {title}
-      </h2>
-      <div className="rounded-lg border border-ash-border bg-carbon p-4 sm:p-5">
-        {children}
-      </div>
-    </section>
-  );
-}
+import { useShortcuts } from './lib/useShortcuts';
+import { useTheme } from './lib/useTheme';
 
 export function App() {
-  const { state, start, reset } = useResearchStream();
+  const { state, start, cancel, reset } = useResearchStream();
+  const { theme, toggle: toggleTheme } = useTheme();
+  const { copied, failed: copyFailed, copy } = useClipboard();
+  const reducedMotion = useReducedMotion() ?? false;
 
-  // "Follow latest": an anchor at the bottom of the live content that we scroll
-  // into view as new timeline steps appear and as report tokens stream in. We
-  // key the effect on the number of steps and the report length (both grow
-  // monotonically during a run), so each new step/token nudges the view down.
-  const followRef = useRef<HTMLDivElement | null>(null);
-  const stepCount = state.steps.length;
-  const reportLength = state.reportText.length;
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const idle = state.status === 'idle';
+  const running = state.status === 'running';
+  const ended = !idle && !running;
+
+  // Elapsed time: live while running, frozen at `endedAt` afterwards.
+  const now = useNow(running);
+  const elapsedMs =
+    state.startedAt === undefined ? 0 : (state.endedAt ?? now) - state.startedAt;
+
+  // Follow the newest step / streamed token (monotonic signal).
+  const followRef = useFollowLatest(
+    running,
+    state.steps.length + state.reportText.length,
+    !reducedMotion,
+  );
+
+  const focusComposer = useCallback(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, []);
+
+  // After "New research" the hero mounts on the next render; focus it then.
+  const pendingFocus = useRef(false);
   useEffect(() => {
-    if (state.status !== 'running') return;
-    followRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [state.status, stepCount, reportLength]);
+    if (idle && pendingFocus.current) {
+      pendingFocus.current = false;
+      inputRef.current?.focus();
+    }
+  }, [idle]);
 
-  function handleSubmit(topic: string) {
-    // A fresh run after done/error clears the previous timeline + report.
-    if (state.status === 'done' || state.status === 'error') reset();
-    start(topic);
+  useShortcuts({ isRunning: running, onFocusComposer: focusComposer, onStop: cancel });
+
+  function runTopic(topic: string) {
+    const trimmed = topic.trim();
+    if (!trimmed || running) return;
+    setDraft(trimmed);
+    start(trimmed);
   }
 
+  function handleNewResearch() {
+    reset();
+    setDraft('');
+    pendingFocus.current = true;
+    window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' });
+  }
+
+  function handleCopy() {
+    void copy(state.reportText);
+  }
+
+  function handleDownload() {
+    downloadTextFile(buildMarkdownFilename(state.topic), state.reportText);
+  }
+
+  const composer = (
+    <Composer
+      value={running ? state.topic : draft}
+      onChange={setDraft}
+      onSubmit={runTopic}
+      onStop={cancel}
+      status={state.status}
+      inputRef={inputRef}
+      size={idle ? 'hero' : 'compact'}
+    />
+  );
+
+  const showReport =
+    state.reportText.length > 0 ||
+    state.status === 'done' ||
+    state.steps.some((step) => step.node === 'synthesizer');
+
+  // Re-key per run so collapse/expand state resets for each new run.
+  const runKey = state.startedAt ?? state.nextStepId;
+
   return (
-    <div className="min-h-screen bg-onyx">
-      <main className="mx-auto flex w-full max-w-[780px] flex-col gap-8 px-5 py-12 sm:px-6 sm:py-16">
-        {/* Header */}
-        <header className="flex flex-col gap-2">
-          <div className="flex items-center gap-2.5">
-            <span className="inline-block h-2.5 w-2.5 rounded-full bg-teal" aria-hidden="true" />
-            <h1 className="font-w590 text-[28px] leading-none text-snow">MedGent</h1>
-          </div>
-          <p className="text-[14px] text-fog-text">
-            Autonomous clinical-literature research agent.
-          </p>
-        </header>
+    <MotionConfig reducedMotion="user">
+      <div className="relative isolate flex min-h-dvh flex-col">
+        <AmbientBackground />
 
-        {/* Topic input + status */}
-        <div className="flex flex-col gap-3">
-          <TopicInput status={state.status} onSubmit={handleSubmit} />
-          <StatusBar status={state.status} iterations={state.iterations} />
-          {state.topic && state.status !== 'idle' && (
-            <p className="text-[13px] text-steel-text">
-              Topic: <span className="text-mist-text">{state.topic}</span>
-            </p>
-          )}
+        <a
+          href="#main"
+          className="btn btn-primary fixed left-4 top-3 z-50 -translate-y-20 focus:translate-y-0"
+        >
+          Skip to content
+        </a>
+
+        <div className="relative z-10 flex min-h-dvh flex-1 flex-col">
+          <Header
+            compact={!idle}
+            status={state.status}
+            elapsedMs={elapsedMs}
+            theme={theme}
+            onToggleTheme={toggleTheme}
+          />
+
+          <main
+            id="main"
+            aria-busy={running}
+            className="mx-auto w-full max-w-[780px] flex-1 px-4 pb-10 sm:px-6"
+          >
+            {idle ? (
+              <Hero onPickExample={runTopic}>{composer}</Hero>
+            ) : (
+              <div className="flex flex-col gap-6 pt-6">
+                {composer}
+
+                <ReasoningSection key={`reasoning-${runKey}`} state={state} elapsedMs={elapsedMs} />
+
+                {state.status === 'error' && state.error && (
+                  <ErrorCard name={state.error.name} detail={state.error.detail} />
+                )}
+                {state.status === 'cancelled' && <StoppedNotice />}
+
+                {showReport && <ReportView state={state} />}
+
+                <AnimatePresence>
+                  {ended && (
+                    <ActionBar
+                      key="actions"
+                      hasReport={state.reportText.length > 0}
+                      copied={copied}
+                      copyFailed={copyFailed}
+                      onNewResearch={handleNewResearch}
+                      onRunAgain={() => runTopic(state.topic)}
+                      onCopy={handleCopy}
+                      onDownload={handleDownload}
+                    />
+                  )}
+                </AnimatePresence>
+
+                <SourcesPanel key={`sources-${runKey}`} studies={state.studies} />
+
+                {/* "Follow latest" anchor, kept in view while a run is active. */}
+                <div ref={followRef} className="scroll-mb-24" aria-hidden="true" />
+              </div>
+            )}
+          </main>
+
+          <footer className="mx-auto w-full max-w-[780px] px-4 pb-6 sm:px-6">
+            <Disclaimer />
+          </footer>
         </div>
-
-        {state.status === 'error' && state.error && (
-          <ErrorCard name={state.error.name} detail={state.error.detail} />
-        )}
-
-        {/* Reasoning timeline — the centerpiece */}
-        <Section title="Reasoning">
-          <ReasoningTimeline state={state} />
-        </Section>
-
-        {/* Report */}
-        {(state.reportText || state.status === 'done' || state.status === 'running') && (
-          <Section title="Report">
-            <ReportView state={state} />
-          </Section>
-        )}
-
-        {/* Evaluated studies */}
-        <StudiesPanel studies={state.studies} />
-
-        {/* Persistent disclaimer */}
-        <Disclaimer />
-
-        {/* Scroll anchor: the "follow latest" effect keeps this in view so the
-            newest reasoning step / streaming report stays on screen. */}
-        <div ref={followRef} aria-hidden="true" />
-      </main>
-    </div>
+      </div>
+    </MotionConfig>
   );
 }

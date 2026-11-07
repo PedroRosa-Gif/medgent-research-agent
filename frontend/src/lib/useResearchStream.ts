@@ -33,6 +33,11 @@ export interface UseResearchStream {
   state: ReasoningState;
   /** Open a stream for `topic`. No-op if a run is already in progress. */
   start: (topic: string, maxIterations?: number) => void;
+  /**
+   * Stop listening to the current run (Esc / Stop button) and mark it cancelled.
+   * Only closes the browser side: see the note in the implementation.
+   */
+  cancel: () => void;
   /** Close any open stream and return to idle. */
   reset: () => void;
 }
@@ -55,8 +60,9 @@ export function useResearchStream(): UseResearchStream {
     sourceRef.current = null;
   }, []);
 
+  // The reducer is pure and never reads the clock; we stamp each action here.
   const dispatchEvent = useCallback((event: ResearchEvent) => {
-    dispatch({ type: 'event', event });
+    dispatch({ type: 'event', event, at: Date.now() });
   }, []);
 
   const start = useCallback(
@@ -65,7 +71,7 @@ export function useResearchStream(): UseResearchStream {
       // Guard: ignore empty topics and double-starts while a run is live.
       if (!trimmed || sourceRef.current) return;
 
-      dispatch({ type: 'start', topic: trimmed });
+      dispatch({ type: 'start', topic: trimmed, at: Date.now() });
 
       const params = new URLSearchParams({ topic: trimmed });
       if (maxIterations != null) {
@@ -116,6 +122,15 @@ export function useResearchStream(): UseResearchStream {
     [closeSource, dispatchEvent],
   );
 
+  const cancel = useCallback(() => {
+    // NOTE: this only closes the browser's EventSource. The backend run keeps
+    // going in its worker thread until the graph finishes on its own; the UI
+    // simply stops listening and discards any further output. (The reducer
+    // ignores events after `cancel`, and we also remove the listeners by closing.)
+    closeSource();
+    dispatch({ type: 'cancel', at: Date.now() });
+  }, [closeSource]);
+
   const reset = useCallback(() => {
     closeSource();
     dispatch({ type: 'reset' });
@@ -124,5 +139,5 @@ export function useResearchStream(): UseResearchStream {
   // Close the stream if the component using the hook unmounts mid-run.
   useEffect(() => closeSource, [closeSource]);
 
-  return { state, start, reset };
+  return { state, start, cancel, reset };
 }

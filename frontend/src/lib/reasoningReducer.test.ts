@@ -273,3 +273,119 @@ describe('reasoningReducer', () => {
     expect(state.steps).toHaveLength(0);
   });
 });
+
+describe('reasoningReducer — cancel', () => {
+  function runningWithPartial(): ReasoningState {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 'sglt2', at: 1_000 });
+    state = run(state, [
+      nodeStart('planner'),
+      step('planner', 'Planned 2 queries', { queries: ['a', 'b'] }),
+      nodeStart('fetch_evidence'),
+      token('partial '),
+    ]);
+    return state;
+  }
+
+  it('moves a running run to cancelled, keeping partial steps and report', () => {
+    const state = reasoningReducer(runningWithPartial(), { type: 'cancel', at: 9_000 });
+
+    expect(state.status).toBe('cancelled');
+    expect(state.activeNode).toBeNull();
+    expect(state.endedAt).toBe(9_000);
+    expect(state.topic).toBe('sglt2');
+    expect(state.steps).toHaveLength(2);
+    // The in-flight node stays `thinking`; the view renders it as interrupted
+    // because the run is no longer `running`.
+    expect(state.steps[1].status).toBe('thinking');
+    expect(state.reportText).toBe('partial ');
+    expect(state.error).toBeUndefined();
+  });
+
+  it('ignores events that arrive after cancel', () => {
+    const cancelled = reasoningReducer(runningWithPartial(), { type: 'cancel' });
+    const after = run(cancelled, [
+      token('late'),
+      step('fetch_evidence', 'Fetched', { evidence: [1] }),
+      done({ topic: 'sglt2', report: 'final', iterations: 1, studies: STUDIES }),
+    ]);
+    expect(after).toEqual(cancelled);
+  });
+
+  it('is a no-op unless the run is actually running', () => {
+    const idle = initialState();
+    expect(reasoningReducer(idle, { type: 'cancel' })).toBe(idle);
+
+    let finished = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    finished = run(finished, [done({ topic: 't', report: 'r', iterations: 1, studies: [] })]);
+    expect(reasoningReducer(finished, { type: 'cancel' })).toBe(finished);
+
+    let failed = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    failed = run(failed, [errorEvent({ error: 'X', detail: 'y' })]);
+    expect(reasoningReducer(failed, { type: 'cancel' })).toBe(failed);
+  });
+
+  it('can start a fresh run, or reset, after a cancel', () => {
+    const cancelled = reasoningReducer(runningWithPartial(), { type: 'cancel' });
+
+    const rerun = reasoningReducer(cancelled, { type: 'start', topic: 'sglt2' });
+    expect(rerun.status).toBe('running');
+    expect(rerun.steps).toHaveLength(0);
+    expect(rerun.reportText).toBe('');
+    expect(rerun.endedAt).toBeUndefined();
+
+    const reset = reasoningReducer(cancelled, { type: 'reset' });
+    expect(reset.status).toBe('idle');
+    expect(reset.topic).toBe('');
+    expect(reset.steps).toHaveLength(0);
+  });
+
+  it('keeps step ids monotonic across run / cancel / rerun', () => {
+    const cancelled = reasoningReducer(runningWithPartial(), { type: 'cancel' });
+    let rerun = reasoningReducer(cancelled, { type: 'start', topic: 'again' });
+    rerun = run(rerun, [nodeStart('planner')]);
+    expect(rerun.steps[0].id).toBe(cancelled.nextStepId);
+  });
+});
+
+describe('reasoningReducer — timing', () => {
+  it('records run start/end and per-step durations from the supplied clock', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't', at: 1_000 });
+    expect(state.startedAt).toBe(1_000);
+
+    state = reasoningReducer(state, { type: 'event', at: 1_500, event: nodeStart('planner') });
+    expect(state.steps[0].startedAt).toBe(1_500);
+    expect(state.steps[0].durationMs).toBeUndefined();
+
+    state = reasoningReducer(state, {
+      type: 'event',
+      at: 4_200,
+      event: step('planner', 'Planned', { queries: ['q'] }),
+    });
+    expect(state.steps[0].durationMs).toBe(2_700);
+
+    state = reasoningReducer(state, {
+      type: 'event',
+      at: 9_000,
+      event: done({ topic: 't', report: 'r', iterations: 1, studies: [] }),
+    });
+    expect(state.endedAt).toBe(9_000);
+    expect(state.status).toBe('done');
+  });
+
+  it('records endedAt on error', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't', at: 10 });
+    state = reasoningReducer(state, {
+      type: 'event',
+      at: 70,
+      event: errorEvent({ error: 'E', detail: 'd' }),
+    });
+    expect(state.endedAt).toBe(70);
+  });
+
+  it('works without timestamps (timing fields stay undefined)', () => {
+    let state = reasoningReducer(initialState(), { type: 'start', topic: 't' });
+    state = run(state, [nodeStart('planner'), step('planner', 's', { queries: [] })]);
+    expect(state.startedAt).toBeUndefined();
+    expect(state.steps[0].durationMs).toBeUndefined();
+  });
+});

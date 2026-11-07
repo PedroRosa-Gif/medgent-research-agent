@@ -16,7 +16,9 @@ export type CitationToken =
   | { kind: 'pmid'; value: string; href: string }
   | { kind: 'url'; value: string; href: string };
 
-const PMID_RE = /\[(\d{7,8})\]/g;
+// `[12345678]` or the form the synthesizer prompt asks for, `[PMID12345678]` /
+// `[PMID: 12345678]`. Two capture groups: prefixed (1) and bare (2).
+const PMID_RE = /\[(?:PMID:?\s*(\d{1,9})|(\d{7,8}))\]/g;
 const URL_RE = /\bhttps?:\/\/[^\s<>()[\]]+/g;
 
 /** Build the combined matcher fresh each call (global regexes are stateful). */
@@ -38,7 +40,7 @@ export function linkifyCitations(text: string): CitationToken[] {
     if (match.index > lastIndex) {
       tokens.push({ kind: 'text', value: text.slice(lastIndex, match.index) });
     }
-    const pmid = match[1];
+    const pmid = match[1] ?? match[2];
     if (pmid) {
       tokens.push({
         kind: 'pmid',
@@ -56,4 +58,35 @@ export function linkifyCitations(text: string): CitationToken[] {
     tokens.push({ kind: 'text', value: text.slice(lastIndex) });
   }
   return tokens;
+}
+
+export interface SourceLink {
+  kind: 'pubmed' | 'web';
+  /** Short label to display (e.g. `PMID 12345678` or the URL host). */
+  label: string;
+  href: string;
+}
+
+/**
+ * Turn a study `identifier` (a PMID, optionally `PMID:`-prefixed, or a URL —
+ * see the backend `Evidence` schema) into a link + short label. Returns `null`
+ * for anything we can't safely link (only http/https URLs are linked).
+ */
+export function sourceLink(identifier: string): SourceLink | null {
+  const id = identifier.trim();
+  const pmid = /^(?:PMID:?\s*)?(\d{1,9})$/i.exec(id);
+  if (pmid) {
+    return {
+      kind: 'pubmed',
+      label: `PMID ${pmid[1]}`,
+      href: `https://pubmed.ncbi.nlm.nih.gov/${pmid[1]}/`,
+    };
+  }
+  try {
+    const url = new URL(id);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return { kind: 'web', label: url.hostname.replace(/^www\./, ''), href: url.href };
+  } catch {
+    return null;
+  }
 }
