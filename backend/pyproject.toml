@@ -9,7 +9,16 @@ dependencies = [
     "pydantic-settings>=2",
     "langchain-core>=0.3",
     "langchain-ollama>=0.2",
+    "requests>=2.31",
+    "ddgs>=9",
+    "langgraph>=0.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
 ]
+
+[project.scripts]
+medgent = "medgent.adapters.driving.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -22,6 +31,8 @@ packages = ["src/medgent"]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "responses>=0.25",
+    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]

@@ -23,6 +23,9 @@ dist/
 .coverage.*
 htmlcov/
 
+# ---- Generated reports ----
+reports/
+
 # ---- Environment / secrets ----
 .env
 .env.*

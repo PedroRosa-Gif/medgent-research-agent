@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>MedGent</title>
+  <style>
+    .cross { stroke: #e6e8f5; }
+    .spark { fill: #8a8fe6; }
+    @media (prefers-color-scheme: light) {
+      .cross { stroke: #23284d; }
+      .spark { fill: #5a60c8; }
+    }
+  </style>
+  <path class="cross" d="M30 16v36M12 34h36" fill="none" stroke-width="5.5" stroke-linecap="round"/>
+  <circle class="spark" cx="49" cy="15" r="5.5"/>
+</svg>

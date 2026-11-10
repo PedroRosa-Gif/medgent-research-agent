@@ -10,6 +10,8 @@ from medgent.domain.schemas import (
     Evidence,
     EvidenceSource,
     QueryPlan,
+    StudyBatchExtraction,
+    StudyExtraction,
     StudyType,
 )
 
@@ -172,6 +174,46 @@ def test_evidence_round_trip() -> None:
         url="https://example.org/a",
     )
     assert Evidence.model_validate(evidence.model_dump()) == evidence
+
+
+def test_study_batch_extraction_valid_construction() -> None:
+    batch = StudyBatchExtraction(
+        studies=[
+            StudyExtraction(
+                study_type=StudyType.RCT,
+                sample_size=120,
+                key_finding="Drug X beat placebo.",
+                relevance_score=0.9,
+            ),
+            StudyExtraction(
+                study_type=StudyType.COHORT,
+                key_finding="Association observed.",
+                relevance_score=0.4,
+            ),
+        ]
+    )
+    assert len(batch.studies) == 2
+    assert batch.studies[0].study_type is StudyType.RCT
+    assert batch.studies[1].sample_size is None
+
+
+def test_study_batch_extraction_allows_empty_list() -> None:
+    batch = StudyBatchExtraction(studies=[])
+    assert batch.studies == []
+
+
+def test_study_batch_extraction_round_trip() -> None:
+    batch = StudyBatchExtraction(
+        studies=[
+            StudyExtraction(
+                study_type=StudyType.META_ANALYSIS,
+                sample_size=2000,
+                key_finding="Pooled effect significant.",
+                relevance_score=0.95,
+            ),
+        ]
+    )
+    assert StudyBatchExtraction.model_validate(batch.model_dump()) == batch
 
 
 def test_evaluated_study_round_trip() -> None:
