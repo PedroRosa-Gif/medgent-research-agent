@@ -25,34 +25,29 @@ report with inline citations.
 
 ## Design language
 
-Primary language is **design_v2 (Linear / Changelog)**: near-black canvas,
-layered gray surfaces, 1px hairline borders (no drop shadows), Inter with
-negative letter-spacing and half-step weights, pill outlined buttons. Dark mode
-is the only mode.
+Calm, minimalist "dusk" look: a deep desaturated navy canvas with a faint violet
+undertone, glass surfaces, a faint blueprint grid and a very low-alpha
+indigo/violet haze. Dark is the default theme; light is a soft lavender-tinted
+off-white. No neon: one soft periwinkle accent and a muted lavender secondary.
 
-Tokens (defined in `src/index.css` `@theme`):
+Colors are semantic tokens (raw CSS variables per theme in `src/index.css`,
+exposed to Tailwind as `bg-canvas`, `text-fg`, `text-accent-text`, ...). Change
+values there, not in components. `npm run check:contrast` reads those variables
+and verifies WCAG AA (4.5:1) for text on every surface, over the worst-case
+orb backdrops, in both themes.
 
-| Role | Token | Value |
-| --- | --- | --- |
-| Canvas | `--color-onyx` | `#08090a` |
-| Surface 1 | `--color-carbon` | `#141516` |
-| Surface 2 | `--color-graphite` | `#1c1c1f` |
-| Surface 3 / hover | `--color-smoke` | `#23252a` |
-| Surface 4 / pressed | `--color-iron` | `#2d2e31` |
-| Border (primary) | `--color-ash-border` | `#34343a` |
-| Border (inner) | `--color-ferrite-border` | `#3e3e44` |
-| Text muted / tertiary | `--color-steel-text` | `#62666d` |
-| Text muted | `--color-fog-text` | `#8a8f98` |
-| Text secondary | `--color-mist-text` | `#d0d6e0` |
-| Text primary | `--color-snow` | `#f7f8f8` |
-| **Accent (teal)** | `--color-teal` | `#2dd4bf` |
-| Accent (teal soft) | `--color-teal-soft` | `#5eead4` |
+| Role | Token | Dark | Light |
+| --- | --- | --- | --- |
+| Canvas | `--canvas` | `#0c0e1b` | `#f5f6fb` |
+| Surface / surface 2 | `--surface`, `--surface-2` | `#12152a` / `#1a1e38` | `#ffffff` / `#eceef8` |
+| Text / muted | `--fg`, `--fg-muted` | `#e6e8f5` / `#a2a8c6` | `#14172b` / `#4a4f6b` |
+| Accent (rings, dots) | `--accent` | `#8087e0` | `#6a71d6` |
+| Accent text / links | `--accent-text` | `#aab0f0` | `#4349ae` |
+| Filled button | `--accent-strong` | `#5a60c8` | `#4f55c4` |
+| Secondary (lavender) | `--violet` | `#a99be0` | `#8a78d0` |
 
-**Single accent = muted clinical teal.** It is used in exactly two places: the
-currently-active reasoning node (pulse) and citation links. Everything else is
-monochrome. No Graphite orange, no 600/700 bold headings (510/590 half-steps),
-no large radii except pills, no drop shadows for separation.
-
+The brand mark (`src/components/Logo.tsx`, `public/favicon.svg`) is a thin-stroke
+medical cross with one small accent dot. Keep the two in sync.
 ## SSE consumption & EventSource lifecycle
 
 The browser-native `EventSource` only does GET, which matches

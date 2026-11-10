@@ -73,17 +73,22 @@ let failures = 0;
 for (const [name, v] of Object.entries(themes)) {
   const c = (key) => parseColor(v[key]);
   const canvas = c('canvas');
-  const orbs = ['orb-teal', 'orb-indigo', 'orb-sky', 'orb-emerald'].map(c);
+  // Orbs are whatever `--orb-*` tokens the theme declares (no hardcoded list).
+  const orbNames = Object.keys(v).filter((k) => k.startsWith('orb-'));
+  const orbs = orbNames.map((k) => c(k));
 
-  // Backdrops behind a glass card: bare canvas, each orb at peak, all stacked.
+  // Backdrops behind a glass card: bare canvas, each orb at peak, every pair
+  // overlapping, and all orbs stacked at full strength (stricter than reality).
+  const pairs = orbs.flatMap((_, i) => orbs.slice(i + 1).map((__, k) => [i, i + 1 + k]));
   const backdrops = [
     ['canvas', canvas],
-    ...['teal', 'indigo', 'sky', 'emerald'].map((o, i) => [`canvas+${o} orb`, over(orbs[i], canvas)]),
+    ...orbNames.map((n, i) => [`canvas+${n}`, over(orbs[i], canvas)]),
     // Orbs fade linearly to transparent, so where two overlap each is ~half strength.
-    ...[[0, 1], [0, 2], [1, 3], [2, 3], [0, 3], [1, 2]].map(([i, j]) => [
-      `canvas+${i}+${j} overlap`,
+    ...pairs.map(([i, j]) => [
+      `canvas+${orbNames[i]}+${orbNames[j]} overlap`,
       over(orbs[j], over(orbs[i], canvas, 0.5), 0.5),
     ]),
+    ['canvas+all orbs at peak', orbs.reduce((acc, orb) => over(orb, acc), canvas)],
     ['canvas+top wash', over(c('canvas-wash'), canvas)],
   ];
 
@@ -133,7 +138,7 @@ for (const [name, v] of Object.entries(themes)) {
   const btn = ratio(c('on-accent'), c('accent-strong'));
   if (btn < AA) failures += 1;
   console.log(`${'primary button'.padEnd(32)} on-accent/accent-strong ${btn.toFixed(1)}${btn >= AA ? '' : ' FAIL'}`);
-  for (const stop of ['fg', 'accent-text', 'violet-text']) {
+  for (const stop of ['fg', 'accent-text']) {
     const worst = Math.min(...backdrops.map(([, b]) => ratio(c(stop), b)));
     if (worst < AA) failures += 1;
     console.log(`${'headline gradient stop'.padEnd(32)} ${stop} on canvas/orbs ${worst.toFixed(1)}${worst >= AA ? '' : ' FAIL'}`);

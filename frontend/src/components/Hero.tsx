@@ -1,25 +1,17 @@
 /**
- * Idle state: brand mark, display title, tagline, the composer (passed as
- * children), keyboard hints, example-topic chips, and a one-line "how it works".
+ * Idle state: display title, tagline, a two-sentence explanation of what MedGent
+ * is, the composer (passed as children), keyboard hints and example-topic chips.
+ * Deliberately sparse: no logo here (the header carries the small mark).
  */
 import { motion } from 'motion/react';
 import type { ReactNode } from 'react';
 import { EXAMPLE_TOPICS } from '../lib/examples';
-import { Logo } from './Logo';
-import { NODE_META } from './nodeMeta';
 import { SparkleIcon } from './icons';
 
 interface HeroProps {
   children: ReactNode;
   onPickExample: (topic: string) => void;
 }
-
-const HOW_IT_WORKS = [
-  { node: 'planner', text: 'Plans the search' },
-  { node: 'fetch_evidence', text: 'Searches PubMed and the web' },
-  { node: 'evaluator', text: 'Appraises study quality' },
-  { node: 'synthesizer', text: 'Writes a cited report' },
-] as const;
 
 export function Hero({ children, onPickExample }: HeroProps) {
   return (
@@ -28,16 +20,8 @@ export function Hero({ children, onPickExample }: HeroProps) {
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, ease: 'easeOut' }}
-      className="flex flex-col items-center pt-[clamp(1.5rem,9vh,5.5rem)] pb-10 text-center"
+      className="flex flex-col items-center pt-[clamp(2rem,11vh,6.5rem)] pb-10 text-center"
     >
-      <div className="relative mb-6">
-        <span
-          className="absolute inset-0 -z-10 scale-150 rounded-full bg-accent/30 blur-2xl"
-          aria-hidden="true"
-        />
-        <Logo size={72} className="drop-shadow-[0_10px_28px_rgba(45,212,191,0.35)]" />
-      </div>
-
       <h1
         id="hero-title"
         className="text-gradient text-[clamp(2.75rem,9vw,4.25rem)] font-semibold leading-none tracking-[-0.04em]"
@@ -47,8 +31,12 @@ export function Hero({ children, onPickExample }: HeroProps) {
       <p className="mt-4 max-w-md text-balance text-base text-fg-muted sm:text-lg">
         Autonomous clinical-literature research agent
       </p>
+      <p className="mt-3 max-w-xl text-balance text-sm leading-relaxed text-fg-subtle sm:text-[15px]">
+        Give it a clinical topic and it plans the search, queries PubMed and the web, appraises the
+        evidence and writes a cited report. Its reasoning is shown along the way.
+      </p>
 
-      <div className="mt-9 w-full">{children}</div>
+      <div className="mt-10 w-full">{children}</div>
 
       <p className="mt-3 hidden items-center gap-1.5 text-xs text-fg-subtle sm:flex">
         <span className="kbd">Enter</span> to research
@@ -78,25 +66,6 @@ export function Hero({ children, onPickExample }: HeroProps) {
         </ul>
       </div>
 
-      <ul
-        className="mt-14 grid w-full grid-cols-2 gap-x-4 gap-y-3 text-left text-[13px] text-fg-muted sm:grid-cols-4"
-        aria-label="How MedGent works"
-      >
-        {HOW_IT_WORKS.map(({ node, text }, index) => {
-          const { Icon } = NODE_META[node];
-          return (
-            <li key={node} className="flex items-center gap-2.5">
-              <span className="glass-soft flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-accent-text">
-                <Icon className="h-4 w-4" />
-              </span>
-              <span>
-                <span className="mr-1 font-mono text-[11px] text-fg-subtle">0{index + 1}</span>
-                {text}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
     </motion.section>
   );
 }

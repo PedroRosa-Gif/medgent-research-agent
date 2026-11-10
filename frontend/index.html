@@ -12,8 +12,8 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/x-icon" sizes="48x48" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <meta name="theme-color" content="#060912" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#f3f6fc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0c0e1b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f6fb" media="(prefers-color-scheme: light)" />
 
     <!--
       Apply the saved theme BEFORE first paint (no flash of the wrong theme).
@@ -30,7 +30,7 @@
         var root = document.documentElement;
         root.setAttribute('data-theme', theme);
         root.style.colorScheme = theme;
-        var color = theme === 'light' ? '#f3f6fc' : '#060912';
+        var color = theme === 'light' ? '#f5f6fb' : '#0c0e1b';
         var metas = document.querySelectorAll('meta[name="theme-color"]');
         for (var i = 0; i < metas.length; i++) metas[i].setAttribute('content', color);
       })();

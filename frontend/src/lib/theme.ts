@@ -20,8 +20,8 @@ export const DEFAULT_THEME: Theme = 'dark';
 
 /** Page base colors, mirrored into `<meta name="theme-color">`. */
 export const THEME_COLORS: Record<Theme, string> = {
-  dark: '#060912',
-  light: '#f3f6fc',
+  dark: '#0c0e1b',
+  light: '#f5f6fb',
 };
 
 /** Type guard: is `value` one of the supported themes? */
