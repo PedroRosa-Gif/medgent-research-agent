@@ -9,7 +9,12 @@ cross-query, cross-source deduplicated ``{"evidence": [...]}``.
 
 from __future__ import annotations
 
-from medgent.application.graph import make_fetch_evidence_node, make_planner_node
+from medgent.application.graph import (
+    make_fetch_evidence_node,
+    make_planner_node,
+    make_refine_queries_node,
+)
+from medgent.application.graph.nodes import _PLANNER_PROMPT, _REFINE_PROMPT
 from medgent.domain.schemas import Evidence, EvidenceSource, QueryPlan
 from medgent.domain.state import initial_state
 
@@ -104,6 +109,32 @@ def test_planner_falls_back_to_topic_on_empty_plan() -> None:
     assert update == {"queries": ["aspirin primary prevention"]}
 
 
+def test_planner_truncates_overlong_plan_to_max_queries() -> None:
+    # The model ignored the instruction and returned nine queries; the node must
+    # cap the list in code regardless of what the model returned.
+    plan = QueryPlan(queries=[f"q{i}" for i in range(1, 10)])
+    planner = make_planner_node(FakeLLM(plan), max_queries=5)
+
+    update = planner(initial_state("metformin safety"))
+
+    assert update == {"queries": ["q1", "q2", "q3", "q4", "q5"]}
+
+
+def test_planner_default_cap_is_five() -> None:
+    plan = QueryPlan(queries=[f"q{i}" for i in range(1, 12)])
+    planner = make_planner_node(FakeLLM(plan))  # default max_queries
+
+    update = planner(initial_state("topic"))
+
+    assert len(update["queries"]) == 5
+
+
+def test_planner_prompt_mentions_query_limit() -> None:
+    # The prompt reinforces the cap in natural language (code truncation is the
+    # guarantee, but the prompt should still ask for it).
+    assert "at most five" in _PLANNER_PROMPT.lower()
+
+
 # --- fetch_evidence ----------------------------------------------------------
 
 
@@ -192,3 +223,32 @@ def test_fetch_evidence_tolerates_failing_source() -> None:
         "https://example.com/a",
         "https://example.com/b",
     ]
+
+
+# --- refine_queries ----------------------------------------------------------
+
+
+def test_refine_truncates_overlong_plan_to_max_queries() -> None:
+    plan = QueryPlan(queries=[f"r{i}" for i in range(1, 10)])
+    refine = make_refine_queries_node(FakeLLM(plan), max_queries=5)
+
+    state = initial_state("topic")
+    state["queries"] = ["old-q"]
+    update = refine(state)
+
+    assert update == {"queries": ["r1", "r2", "r3", "r4", "r5"]}
+
+
+def test_refine_default_cap_is_five() -> None:
+    plan = QueryPlan(queries=[f"r{i}" for i in range(1, 12)])
+    refine = make_refine_queries_node(FakeLLM(plan))  # default max_queries
+
+    state = initial_state("topic")
+    state["queries"] = ["old-q"]
+    update = refine(state)
+
+    assert len(update["queries"]) == 5
+
+
+def test_refine_prompt_mentions_query_limit() -> None:
+    assert "at most five" in _REFINE_PROMPT.lower()
