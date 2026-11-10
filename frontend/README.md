@@ -48,13 +48,27 @@ orb backdrops, in both themes.
 
 The brand mark (`src/components/Logo.tsx`, `public/favicon.svg`) is a thin-stroke
 medical cross with one small accent dot. Keep the two in sync.
+
+## UX features
+
+Post-run action bar (New research / Run again / Copy report / Download `.md`), a
+Stop control while running, keyboard shortcuts (`Enter` to submit, `Esc` to stop,
+`/` or `Ctrl/Cmd+K` to focus the composer), example-topic chips, a collapsible
+Sources panel, and a centered layout that auto-scrolls to follow the active step.
+Accessibility: landmarks, visible focus, an `aria-live` region for the narration,
+and full `prefers-reduced-motion` support.
+
+> **Note:** Stop closes the `EventSource` so the UI stops listening, but the backend
+> run continues in its worker thread until it finishes (see `roadmap.md`).
+
 ## SSE consumption & EventSource lifecycle
 
 The browser-native `EventSource` only does GET, which matches
 `GET /research/stream`. Because the backend frames **named** events, the hook
-registers one `addEventListener` per name (`step`, `token`, `done`, `error`) —
-`onmessage` would only catch unnamed `message` events and is intentionally not
-used.
+registers one `addEventListener` per name (`node_start`, `step`, `token`, `done`,
+`error`) — `onmessage` would only catch unnamed `message` events and is
+intentionally not used. `node_start` drives the per-node "thinking" line; `step`
+carries the finished result that the reducer narrates.
 
 Lifecycle (in `src/lib/useResearchStream.ts`): the connection is closed on the
 terminal `done` event, on an `error` event (server-sent JSON error _or_ a

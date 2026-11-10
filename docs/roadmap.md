@@ -1,51 +1,70 @@
-# Roadmap & Deferred Decisions
+# Roadmap & Backlog
 
-Living document tracking build phases and decisions deliberately deferred to a
-later task, so nothing gets lost between sessions.
+Living document: what was built, in order, and what is deliberately deferred.
 
-## Done / previously parked
+## Build log (shipped)
 
-### 🐳 Docker & containerization — Ollama part DONE
-- Decided to run **Ollama via Docker** (not a native install), since it keeps the
-  dev machine clean and matches the user's workflow.
-- **Done (Task 9):** a root `docker-compose.yml` with:
-  - an `ollama/ollama` service exposing port `11434`;
-  - a **named volume** (`ollama_data`) persisting pulled models — models live in the
-    volume, NOT in the image and NOT in the git repo;
-  - an `ollama-init` one-shot service that waits for the server to be healthy and
-    **auto-pulls the model** (`OLLAMA_MODEL`, default `qwen2.5:7b`), so a plain
-    `docker compose up` ends with the model present.
-  - See [`running-locally.md`](running-locally.md) for the walkthrough and
-    `scripts/smoke_ollama.py` for a manual end-to-end check.
-- The `OllamaAdapter` already reads the base URL from settings
-  (`OLLAMA_BASE_URL`, default `http://localhost:11434`), so it points at the
-  container without code changes — the Docker work touched no production Python.
-- **Still future:** bringing the **backend (FastAPI) and frontend** into the same
-  compose stack. That ships alongside the API/UI tasks, not here.
+- [x] **Task 1 — Backend scaffolding.** Hexagonal layout (`domain`/`application`/
+  `adapters`), uv, ruff, pytest, GitHub Actions CI, `.gitattributes` for LF.
+- [x] **Task 2 — Agent state + Pydantic schemas.** `AgentState` (TypedDict) holding
+  Pydantic models (`Evidence`, `EvaluatedStudy`, `QueryPlan`, enums); pure domain.
+- [x] **Task 3 — LLM provider abstraction.** `LLMPort` + `OllamaAdapter` (real) and
+  `GroqAdapter`/`GeminiAdapter` stubs behind the same port; a `build_llm` factory.
+- [x] **Task 4 — PubMed retrieval.** `EvidenceRetrievalPort` + `PubMedAdapter`
+  (Entrez esearch/efetch via `requests`, retry/backoff, mocked tests).
+- [x] **Task 5 — Web search + aggregation.** `WebSearchAdapter` (DuckDuckGo via
+  `ddgs`) behind the same port + an `aggregate_evidence` multi-source helper.
+- [x] **Task 6 — planner + fetch_evidence nodes.** DI factory closures depending on
+  ports only.
+- [x] **Task 7 — evaluator node.** Hybrid scoring: deterministic heuristics
+  (domain) + structured LLM extraction + a code-computed `quality_score`.
+- [x] **Task 8 — refine_queries + graph assembly.** `StateGraph` with conditional
+  routing (the self-correction loop) compiled with a `MemorySaver` checkpointer.
+- [x] **Task 9 — Docker + Ollama.** Root `docker-compose.yml`: server + one-shot
+  auto model-pull, named volume, **NVIDIA GPU reservation enabled** (see caveat).
+- [x] **Task 10 — synthesizer + CLI.** `synthesizer` node, `ResearchTopicUseCase`,
+  and `python -m medgent "<topic>"` with terminal streaming + markdown file output.
+- [x] **Task 11a — FastAPI SSE API.** `GET /health`, `POST /research` (sync), and
+  `GET /research/stream` (SSE). Events: `node_start`, `step`, `token`, `done`,
+  `error`. The sync generator runs off-thread so the event loop isn't blocked.
+- [x] **Task 11b — React single-page UI.** SSE-driven reasoning timeline, token-
+  streamed report, sources panel; pure reducer tested with Vitest.
+- [x] **Reasoning UX + redesign.** Query cap (≤5) to kill a runaway-fetch slowdown;
+  `node_start` events + "thinking" labels and rich result narration; centered,
+  auto-scrolling layout; dark/light themes, glass surfaces, ambient glow, blueprint
+  grid; minimalist medical-cross brand mark; GPU acceleration for Ollama.
 
-## Deferred / parked work
+## Backlog (not yet done)
 
-### LLM providers (partial by design)
-- Task 3 implements the **Ollama adapter for real**; **Groq** and **Gemini** are
-  explicit stubs behind the same `LLMPort`, to be implemented when needed.
+### Code (planned for a follow-up PR, kept out of the docs PR)
+- **Optional GPU compose override.** `docker-compose.yml` currently reserves an
+  NVIDIA GPU unconditionally, so `docker compose up` fails on a machine without one
+  (workaround today: comment out the `deploy:` block). Move the reservation to a
+  `docker-compose.gpu.yml` override so the base file runs anywhere.
+- **Frontend CI job.** CI runs the backend only. Add a job: `npm ci`, `lint`,
+  `test`, `build`, `check:contrast`.
+- **Implement Groq / Gemini adapters for real.** They are stubs. Groq's free tier
+  (Llama 3.x) gives fast, high-quality runs without a local GPU — the best path for
+  someone cloning without NVIDIA hardware.
+- **API hardening.** `POST /research` / the SSE endpoint have no topic-length limit
+  or concurrency guard; each request drives an LLM + external calls. Add bounds
+  before any public deployment.
+- **UI "Stop" truly cancels.** The browser stops listening, but the backend run
+  continues in its worker thread (and keeps using the GPU) until it finishes.
+- **Query/source separation.** Planner queries use PubMed/MeSH syntax (`AND`, …)
+  that goes verbatim to web search, hurting web results. Tailor per source.
 
-## Documentation debt
-- `docs/architecture.md` on disk is still the ORIGINAL draft (mentions ReAct,
-  LocalRAGTool, Streamlit). The revised architecture (hexagonal, React/FastAPI/SSE,
-  provider abstraction) was written during planning but appears NOT to have been
-  merged. Needs reconciliation in a follow-up — flagged to the user.
-
-## Build phases (high level)
-- [x] Task 1 — Backend scaffolding (hexagonal, uv, ruff, pytest, CI)
-- [x] Task 2 — Agent state + Pydantic schemas (domain)
-- [x] Task 3 — LLM provider abstraction (port + Ollama adapter + Groq/Gemini stubs)
-- [x] Task 4 — PubMed retrieval tool (structured retrieval)
-- [x] Task 5 — Web search tool + common retrieval interface
-- [x] Task 6 — planner + fetch_evidence nodes
-- [x] Task 7 — evaluator node (heuristics + structured extraction + score)
-- [x] Task 8 — refine_queries + graph assembly (conditional routing + checkpointer)
-- [x] Task 9 — Docker + Ollama local LLM infrastructure (compose + auto model pull)
-- [ ] Task 10 — synthesizer node + end-to-end CLI ← **next**
-- [ ] Task 11 — React single-page reasoning UI (+ FastAPI/SSE)
-- [ ] Task 12 — optional LangSmith observability + polish
-- [ ] Future — containerize backend + frontend into the same compose stack
+### Larger / future
+- **LangSmith tracing.** Only the `langsmith_api_key` setting exists; wire actual
+  tracing, enabled when the key is present.
+- **Persistent checkpointer (SQLite).** `MemorySaver` loses state on restart.
+  SQLite persistence unlocks the **conversational follow-up mode** (resume a
+  `thread_id` with a new question instead of a fresh run).
+- **Semantic RAG over local PDFs.** A `VectorRagAdapter` (ChromaDB/FAISS) behind the
+  existing `EvidenceRetrievalPort` — no domain changes needed.
+- **Higher medical rigor.** Evidence pyramid (meta-analysis > RCT > observational)
+  and PICO extraction.
+- **Containerize the whole stack.** Bring backend (FastAPI) and frontend into the
+  compose stack alongside Ollama.
+- **Frontend component/e2e tests.** Current coverage is the pure reducer + theme
+  logic only.
